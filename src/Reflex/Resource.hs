@@ -1,0 +1,85 @@
+module Reflex.Resource (
+    ResourceContext,
+    ResourceT,
+    runResourceT,
+    runResourceTContext,
+    allocate,
+    allocateFreshId,
+    resourceContext,
+    -- resourceContextRes,
+    -- resourceContextRes',
+    -- resourceContextDynRes,
+    -- resourceContextDynRes',
+    performEventRes,
+    performEventRes_,
+    -- ** Adjustable-like operations
+    ReplaceableResourceContext,
+    runWithReplaceContext,
+    runWithReplaceRes,
+    runWithReplaceRes',
+    runWithReplaceDynRes,
+    runWithReplaceDynRes',
+    traverseIntMapWithKeyWithAdjustContext,
+    traverseIntMapWithKeyWithAdjustRes,
+    traverseIntMapWithKeyWithAdjustRes',
+    traverseIntMapWithKeyWithAdjustDynRes,
+    traverseIntMapWithKeyWithAdjustDynRes',
+    traverseDMapWithKeyWithAdjustWithMoveContext,
+    traverseDMapWithKeyWithAdjustWithMoveRes,
+    traverseDMapWithKeyWithAdjustWithMoveRes',
+    traverseDMapWithKeyWithAdjustWithMoveDynRes,
+    traverseDMapWithKeyWithAdjustWithMoveDynRes',
+    dynResReplace,
+    dynResIntMap,
+    dynResDMap,
+    -- ** Temporary context
+    TmpResourceContext,
+    withTmpContext,
+    allocateTmp,
+    allocateFreshIdTmp,
+    -- ** Other
+    getFreshId,
+    getNewSupply,
+
+    -- * Res monad
+    Res,
+    resSampler,
+    tmpRes,
+    tmpResSampler,
+    castRes,
+    UnRes,
+    toRes,
+    fromRes,
+    -- ** Adjustable-like operations
+    whenRes,
+    whenRes',
+    ifThenElseRes,
+    ifThenElseRes',
+    -- * DynRes monad
+    DynRes,
+    dynRes,
+    dynResDyn,
+    dynResSampler,
+    castDynRes,
+    -- sampling,
+    unwrapDynRes,
+    toDynRes,
+    fromDynRes,
+    sampleUnRes,
+    -- ** Conditional resources
+    whenDynRes,
+    whenDynRes',
+    ifThenElseDynRes,
+    ifThenElseDynRes',
+    -- ** Adjustable-like operations
+    withDynResReplace,
+    withDynResReplace',
+    -- ** Dynamic-like operations
+    module Reflex.Resource.DynRes,
+    -- * MonadAllocate
+    RFrameId,
+    MonadAllocate(..),
+) where
+
+import Reflex.Resource.DynRes
+import Reflex.Resource.Internal

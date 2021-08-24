@@ -1,0 +1,52 @@
+cabal-version:      2.4
+name:               reflex-resource
+version:            0.1.0.0
+synopsis:           A library for FRP-driven resource management
+-- description:
+homepage:           https://github.com/lprez/reflex-resource
+bug-reports:        https://github.com/lprez/reflex-resource/issues
+license:            BSD-2-Clause
+license-file:       LICENSE
+author:             Luca Prezzavento
+maintainer:         lucabprezzavento@gmail.com
+category:           FRP
+extra-source-files: README.md, CHANGELOG.md
+
+library
+    exposed-modules:
+        Reflex.Resource
+        Reflex.Resource.IntMapAlloc
+        Reflex.Resource.DynRes
+    other-modules:
+        Reflex.Resource.Internal
+    other-extensions:
+        FlexibleInstances MultiParamTypeClasses GeneralizedNewtypeDeriving
+        FlexibleContexts UndecidableInstances RecursiveDo RankNTypes
+        TypeApplications TypeFamilies StandaloneDeriving ConstraintKinds
+    build-depends:
+        base ^>=4.14.2.0,
+        mtl ^>=2.2.2,
+        containers ^>=0.6.4.1,
+        reflex ^>=0.8.1.0,
+        concurrent-supply ^>=0.1.8,
+        dependent-map ^>=0.4.0.0,
+        dependent-sum ^>=0.6.2.0,
+        patch ^>=0.0.4.0,
+    hs-source-dirs:   src
+    default-language: Haskell2010
+
+test-suite reflex-resource-test
+    default-language: Haskell2010
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   src test
+    main-is:          ValidateAllocTest.hs
+    build-depends:
+        base ^>=4.14.2.0,
+        mtl ^>=2.2.2,
+        containers ^>=0.6.4.1,
+        reflex ^>=0.8.1.0,
+        concurrent-supply ^>=0.1.8,
+        dependent-map ^>=0.4.0.0,
+        dependent-sum ^>=0.6.2.0,
+        patch ^>=0.0.4.0,
+        random ^>=1.1,
