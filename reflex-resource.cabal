@@ -15,7 +15,6 @@ extra-source-files: README.md, CHANGELOG.md
 library
     exposed-modules:
         Reflex.Resource
-        Reflex.Resource.IntMapAlloc
         Reflex.Resource.DynRes
     other-modules:
         Reflex.Resource.Internal
