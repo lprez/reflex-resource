@@ -10,8 +10,10 @@ import Control.Monad.Reader
 import Reflex.Class
 import Reflex.Adjustable.Class
 import Reflex.PerformEvent.Class
+import System.Random
 
 import Reflex.Resource
+import Reflex.Resource.Allocate
 
 type ValidateState = (S.IntSet, I.IntMap S.IntSet)
 
@@ -35,15 +37,19 @@ instance PerformEvent t m => PerformEvent t (ValidateAllocT m) where
     performEvent_ e = ValidateAllocT $ performEvent_ (fmap unValidateAllocT e)
     performEvent e = ValidateAllocT $ performEvent (fmap unValidateAllocT e)
 
-instance MonadIO m => MonadAllocate (ValidateAllocT m) where
+instance (MonadIO m, MonadIO (Performable m)) => MonadAllocate (ValidateAllocT m) where
     type Allocation (ValidateAllocT m) = S.IntSet
-    allocateFrame rid allocations = validateAllocT $ \stateRef -> liftIO . atomicModifyIORef' stateRef $
-                                        \(resources, frames) -> ((S.union resources allocations, I.insert rid allocations frames), ())
-    deallocateFrame rid = validateAllocT $ \stateRef -> liftIO . atomicModifyIORef' stateRef $
-                                        \(resources, frames) -> ((S.difference resources (frames I.! rid), I.delete rid frames), ())
+    createFrame allocations = validateAllocT $ \stateRef ->
+            do rid <- liftIO randomIO
+               return ( liftIO . atomicModifyIORef' stateRef $
+                            \(resources, frames) -> ((S.union resources allocations, I.insert rid allocations frames), ())
+                      , liftIO . atomicModifyIORef' stateRef $
+                            \(resources, frames) -> ((S.difference resources (frames I.! rid), I.delete rid frames), ())
+                      )
 
-newResource :: Monad m => Int -> m S.IntSet
-newResource = return . S.singleton
+newResource :: MonadIO m => m (Int, S.IntSet)
+newResource = do rid <- liftIO randomIO
+                 return (rid, S.singleton rid)
 
 checkResource :: MonadIO m => Int -> ValidateAllocT m Bool
 checkResource resid = validateAllocT $ \stateRef -> liftIO (readIORef stateRef) >>= \(resources, _) -> return $ S.member resid resources

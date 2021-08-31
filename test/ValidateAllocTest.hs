@@ -36,10 +36,10 @@ import ValidateAlloc
 
 type ValidateT r t m a = ResourceT r t (ValidateAllocT m) a
 
-testResource :: (Reflex t, Monad m, MonadIO (Performable m), ResourceContext r r') => ValidateT r' t m (DynRes r' t S.IntSet)
-testResource = fmap (constDynRes . fmap S.singleton) $ allocateFreshId (pure <$> newResource)
+testResource :: (Reflex t, Monad m, MonadIO (Performable m), MonadIO m, ResourceContext r r') => ValidateT r' t m (DynRes r' t S.IntSet)
+testResource = fmap (constDynRes . fmap S.singleton) $ allocate (pure <$> newResource)
 
-testIntMap :: (ReplaceableResourceContext rp r t (ValidateAllocT m), MonadIO (Performable m), Adjustable t m)
+testIntMap :: (ReplaceableResourceContext rp r t (ValidateAllocT m), MonadIO m, MonadIO (Performable m), Adjustable t m)
            => (forall r'. ResourceContext r r' => ValidateT r' t m (DynRes r' t S.IntSet))
            -> Event t Int
            -> ValidateT r t m (DynRes r t S.IntSet)
@@ -48,7 +48,7 @@ testIntMap f ev = do resultMap <- dynResIntMap (\_ _ -> f) (I.fromList [(0, ())]
     where mkPatch n | n < 0 = PatchIntMap $ I.fromList [(-n, Nothing)]
           mkPatch n = PatchIntMap $ I.fromList [(n, Just ())]
 
-test :: (ReplaceableResourceContext rp r t (ValidateAllocT m), Monad m, MonadIO (Performable m), MonadSample t (Performable m), Adjustable t m)
+test :: (ReplaceableResourceContext rp r t (ValidateAllocT m), Monad m, MonadIO m, MonadIO (Performable m), MonadSample t (Performable m), Adjustable t m)
      => Event t Int
      -> Event t Int
      -> Event t Int

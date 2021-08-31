@@ -25,12 +25,7 @@ import Reflex.Dynamic
 import Reflex.Adjustable.Class
 import Reflex.PerformEvent.Class
 
-type RFrameId = Int
-
-class (Monoid (Allocation m), Monad m) => MonadAllocate m where
-    type family Allocation m
-    allocateFrame :: RFrameId -> Allocation m -> m ()
-    deallocateFrame :: RFrameId -> m ()
+import Reflex.Resource.Allocate (MonadAllocate(..))
 
 -- | A resource or set of resources guaranteed to exist within the context @r@. Use the 'Monad' instance
 -- to combine different resources, use the 'UnRes' type to combine them with other values you can then
@@ -141,12 +136,12 @@ mapAccumMaybeMDynRes :: (Reflex t, MonadHold t m, MonadFix m) => (forall r'. Res
 mapAccumMaybeMDynRes f (Res a0) = fmap (\(d, e) -> (DynRes d, e)) . mapAccumMaybeMDyn (\a -> fmap (\(a', c) -> (fmap unRes a', c)) . f (Res a)) a0
 
 
-data RFrame as pm t = RFrame { allocations :: as
-                             , nestedAllocations :: pm ()
-                             , nestedRFrames :: Behavior t [RFrameId] -- (to deallocate when the current RFrame is switched out)
-                             }
+data RFrame m t = RFrame { allocations :: Allocation m          -- ^ Pending allocations.
+                         , initialization :: Performable m ()   -- ^ Actions to perform to initialize this frame.
+                         , finalization :: Behavior t (Performable m ())
+                         }
 
-newtype ResourceT r t m a = ResourceT { unResourceT :: StateT (Supply, RFrame (Allocation (Performable m)) (Performable m) t) m a }
+newtype ResourceT r t m a = ResourceT { unResourceT :: StateT (Supply, RFrame m t) m a }
     deriving (Functor, Applicative, Monad, MonadIO, MonadFix)
 
 data InternalResourceContext r
@@ -179,37 +174,44 @@ instance PerformEvent t m => PerformEvent t (ResourceT r t m) where
     performEvent_ = lift . performEvent_
     performEvent = lift . performEvent
 
-runRFrame :: (Monad m, Reflex t, Monad (Performable m), MonadAllocate (Performable m))
+runRFrame :: (Monad m, Reflex t, Monad (Performable m), MonadAllocate m)
           => Supply
           -> ResourceT r t m a
-          -> m (a, (Supply, (RFrameId, RFrame (Allocation (Performable m)) (Performable m) t)))
-runRFrame supply r = do ((rid, x), (supply', rframe)) <- runStateT (unResourceT $ liftA2 (,) getFreshId r) (supply, emptyRFrame)
-                        return (x, (supply', (rid, rframe)))
-    where emptyRFrame = RFrame mempty (return ()) (constant [])
+          -> m (a, (Supply, (Performable m (), Behavior t (Performable m ()))))
+runRFrame supply r = do (x, (supply', rframe)) <- runStateT (unResourceT $ r <* newRFrame)
+                                                            (supply, emptyRFrame)
+                        return (x, (supply', (initialization rframe, finalization rframe)))
+    where emptyRFrame = RFrame mempty (return ()) (constant (return ()))
 
+-- | Allocate the current frame and start a new one.
+newRFrame :: (Reflex t, Monad m, MonadAllocate m, Monad (Performable m)) => ResourceT r t m ()
+newRFrame = do (_, rframe) <- ResourceT get
+               (inm, finm) <- lift $ createFrame (allocations rframe)
+               ResourceT . modify $ \(supply, _) -> ( supply
+                                                    , rframe { allocations = mempty
+                                                             , initialization = initialization rframe >> inm
+                                                             , finalization = (finm >>) <$> finalization rframe
+                                                             }
+                                                    )
 getFreshId :: Monad m => ResourceT r t m Int
 getFreshId = ResourceT $ state (\(supply, rframe) -> let (rid, supply') = freshId supply in (rid, (supply', rframe)))
 
 getNewSupply :: Monad m => ResourceT r t m Supply
 getNewSupply = ResourceT $ state (\(supply, rframe) -> let (s1, s2) = splitSupply supply in (s1, (s2, rframe)))
 
--- | Run a ResourceT computation, returning the result of the computation, the initial allocations
+-- | Run a ResourceT computation, returning the result of the computation, the initialization action
 -- and a sampling action that returns the final deallocations. @'Performable' m@ actions that access
--- resources must not be schedule before the allocating action or after the deallocating action.
-runResourceT :: (Reflex t, Monad m, MonadAllocate (Performable m), MonadSample t m')
+-- resources must not be scheduled before the initialization or after the deallocation.
+runResourceT :: (Reflex t, Monad m, MonadAllocate m, MonadSample t m', Monad (Performable m))
              => Supply
              -> ResourceT r t m a
              -> m (a, Supply, Performable m (), m' (Performable m ()))
-runResourceT supply r = do (x, (supply', (rid, rframe))) <- runRFrame supply r
-                           return ( x
-                                  , supply'
-                                  , allocateRFrame rid rframe
-                                  , fmap (deallocateRFrame rid) (sample (nestedRFrames rframe))
-                                  )
+runResourceT supply r = do (x, (supply', (inm, finm))) <- runRFrame supply r
+                           return (x, supply', inm, sample finm)
 
 -- | Run a ResourceT computation in a 'ResourceContext', allowing you to return resources.
 -- Resources referred to by the @Res@ value must not be used before the allocation or after the deallocation.
-runResourceTContext :: (Reflex t, Monad m, MonadAllocate (Performable m), MonadSample t m')
+runResourceTContext :: (Reflex t, Monad m, MonadAllocate m, MonadSample t m', Monad (Performable m))
                     => Supply
                     -> (forall r'. ResourceContext () r' => ResourceT r' t m (Res r' a))
                     -> m (a, Supply, Performable m (), m' (Performable m ()))
@@ -257,97 +259,76 @@ performEventRes_ (Res x) = performEvent_ x
 performEventRes :: PerformEvent t m => Res r (Event t (Performable m a)) -> ResourceT r t m (Event t a)
 performEventRes (Res x) = performEvent x
 
-allocateRFrame :: MonadAllocate m => RFrameId -> RFrame (Allocation m) m t -> m ()
-allocateRFrame rid rframe = do nestedAllocations rframe
-                               allocateFrame rid (allocations rframe)
-
-deallocateRFrame :: MonadAllocate m => RFrameId -> [RFrameId] -> m ()
-deallocateRFrame rid nestedRIds = do deallocateFrame rid
-                                     mapM_ deallocateFrame nestedRIds
-
 -- | Allocate a new resource.
-allocate :: (ResourceContext rp r, MonadAllocate (Performable m), Monad m)
-         => m (a, Res r (Allocation (Performable m)))
+allocate :: (ResourceContext rp r, MonadAllocate m, Monad m)
+         => m (Res r (a, Allocation m))
          -> ResourceT r t m (Res r a)
-allocate mkAllocation = do (x, Res newAllocations) <- lift mkAllocation
+allocate mkAllocation = do Res (x, newAllocations) <- lift mkAllocation
                            ResourceT . modify $ \(supply, rframe) ->
                                 let allocations' = allocations rframe <> newAllocations
                                 in (supply, rframe { allocations = allocations' })
                            return (Res x)
 
 -- | Allocate a new resource.
-allocateTmp :: (ResourceContext rp r, MonadAllocate (Performable m), Monad m)
-            => m (a, Res (TmpResourceContext r) (Allocation (Performable m)))
+allocateTmp :: (ResourceContext rp r, MonadAllocate m, Monad m)
+            => m (Res (TmpResourceContext r) (a, Allocation m))
             -> ResourceT r t m (Res r a)
-allocateTmp = allocate . fmap (\(x, Res a) -> (x, Res a))
+allocateTmp = allocate . fmap (\(Res x) -> (Res x))
 
--- | Get a unique identifier and allocate a new resource using it.
-allocateFreshId :: (ResourceContext rp r, MonadAllocate (Performable m), Monad m)
-                => (Int -> m (Res r (Allocation (Performable m))))
-                -> ResourceT r t m (Res r Int)
-allocateFreshId f = getFreshId >>= allocate . (\sid -> ((,) sid) <$> f sid)
-
--- | Get a unique identifier and allocate a new resource using it.
-allocateFreshIdTmp :: (ResourceContext rp r, MonadAllocate (Performable m), Monad m)
-                   => (Int -> m (Res (TmpResourceContext r) (Allocation (Performable m))))
-                   -> ResourceT r t m (Res r Int)
-allocateFreshIdTmp f = getFreshId >>= allocateTmp . (\sid -> ((,) sid) <$> f sid)
-
--- | Use a temporary context to allocate some resources.
-withTmpContext :: (Reflex t, MonadSample t m, MonadSample t (Performable m), MonadAllocate (Performable m), ResourceContext rp r, PerformEvent t m)
+-- | Use a temporary context to allocate some resources. The resources of the first context are deallocated after
+-- the initialization of the second context.
+withTmpContext :: (Reflex t, MonadSample t m, MonadSample t (Performable m), MonadAllocate m, ResourceContext rp r, PerformEvent t m)
                => (forall r' t'. ResourceContext r r' => ResourceT r' t' m (Res r' x))
                   -- ^ Context in which the temporary resources are created.
                -> (forall r'. ResourceContext r r' => Res (TmpResourceContext r') x -> ResourceT r' t m (Res r' b))
                   -- ^ Context in which the temporary resources are used.
                -> ResourceT r t m (Res r b)
 withTmpContext t f = do supply <- fst <$> ResourceT get
-                        (Res act, supply', as', mds') <- lift $ runResourceT supply (t @(InternalResourceContext _))
-                        (Res x, (supply'', (rid', rframe'))) <- lift $ runRFrame supply' $ (f @(InternalResourceContext _)) (Res act)
-                        ds' <- mds'
-                        ownRid <- getFreshId
+                        (Res act, supply', tinm, tsfinm) <- lift $ runResourceT supply (t @(InternalResourceContext _))
+                        (Res x, (supply'', (inm, bfinm))) <- lift $ runRFrame supply' $ (f @(InternalResourceContext _)) (Res act)
+                        tfinm <- tsfinm
+                        newRFrame
                         ResourceT . modify $ \(_, rframe) -> ( supply''
-                                                             , rframe { allocations = mempty
-                                                                      , nestedAllocations = do allocateRFrame ownRid rframe
-                                                                                               as'
-                                                                                               allocateRFrame rid' rframe'
-                                                                                               ds'
-                                                                      , nestedRFrames = do ownNestedRFrames <- nestedRFrames rframe
-                                                                                           nestedRFrames' <- nestedRFrames rframe'
-                                                                                           return $ rid' : nestedRFrames' ++ (ownRid : ownNestedRFrames)
+                                                             , rframe { initialization = do initialization rframe
+                                                                                            tinm
+                                                                                            inm
+                                                                                            tfinm
+                                                                      , finalization = (>>) <$> bfinm <*> finalization rframe
                                                                       }
                                                              )
                         return (Res x)
 
-unsafeRunWithReplace :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate (Performable m))
+unsafeRunWithReplace :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate m, Monad (Performable m))
                      => ResourceT r t m a
                      -> Event t (ResourceT r t m b)
                      -> ResourceT r t m (a, Event t b)
 unsafeRunWithReplace r0 ev =
     do sInit0 <- getNewSupply
-       rec ((x, state0@(_, (rid0, rframe0))), res') <- lift $ runWithReplace (runRFrame sInit0 r0)
-                                                                             (uncurry runRFrame <$> attach supply' ev)
-           (state', ev') <- mapAccumMB (\(_, (rid1, rframe1)) state2@(_, (rid2, rframe2)) ->
-                                            do nested1 <- sample $ nestedRFrames rframe1
-                                               return (state2, (do deallocateRFrame rid1 nested1
-                                                                   allocateRFrame rid2 rframe2)))
+       rec ((x, state0@(_, (in0, _))), res') <- lift $ runWithReplace (runRFrame sInit0 r0)
+                                                                      (uncurry runRFrame <$> attach supply' ev)
+           (state', ev') <- mapAccumMB (\(_, (_, bfin1)) state2@(_, (in2, _)) ->
+                                            do fin1 <- sample bfin1
+                                               return (state2, fin1 >> in2))
                                        state0
                                        (fmapCheap snd res')
            let supply' = fmap fst state'
        performEvent_ ev'
-       ownRid <- getFreshId
+       newRFrame
        ResourceT . modify $ \(supply, rframe) -> ( supply
-                                                 , rframe { allocations = mempty
-                                                          , nestedAllocations = do allocateRFrame ownRid rframe
-                                                                                   allocateRFrame rid0 rframe0
-                                                          , nestedRFrames = do ownNestedRFrames <- nestedRFrames rframe
-                                                                               (_, (rid', rframe')) <- state'
-                                                                               nestedRFrames' <- nestedRFrames rframe'
-                                                                               return $ rid' : nestedRFrames' ++ (ownRid : ownNestedRFrames)
+                                                 , rframe { initialization = initialization rframe >> in0
+                                                          , finalization = do (_, (_, bfin')) <- state'
+                                                                              fin' <- bfin'
+                                                                              finm <- finalization rframe
+                                                                              return $ fin' >> finm
                                                           }
                                                  )
        return (x, fmap fst res')
 
-type ReplaceableResourceContext rp r t m = (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate (Performable m), ResourceContext rp r)
+type ReplaceableResourceContext rp r t m = ( Adjustable t m, MonadHold t m
+                                           , MonadFix m , PerformEvent t m
+                                           , MonadAllocate m, ResourceContext rp r
+                                           , Monad (Performable m)
+                                           )
 
 -- | Select between two actions based on the availability of a 'Res'.
 ifThenElseRes :: ResourceContext rp r
@@ -482,7 +463,7 @@ runWithReplaceDynRes' r0 ev = do ((x0, s0), res') <- unsafeRunWithReplace (resou
                                  s <- join <$> holdDynRes (pure s0) (fmapCheap (pure . snd) res')
                                  return (x0, fmap fst res', s)
 
-unsafeTraverseIntMapWithKeyWithAdjust :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate (Performable m))
+unsafeTraverseIntMapWithKeyWithAdjust :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate m, Monad (Performable m))
                                       => (I.Key -> v -> ResourceT r t m v')
                                       -> I.IntMap v
                                       -> Event t (I.PatchIntMap v)
@@ -497,19 +478,18 @@ unsafeTraverseIntMapWithKeyWithAdjust f im0 im' =
                                                     I.mergeA I.preserveMissing
                                                              (I.traverseMaybeMissing $ \_ intPatch ->
                                                                        case intPatch of
-                                                                            Just state2@(_, (rid2, rframe2)) ->
-                                                                                 do modify $ \(as, ds) -> (as >> allocateRFrame rid2 rframe2, ds)
+                                                                            Just state2@(_, (in2, _)) ->
+                                                                                 do modify $ \(as, ds) -> (as >> in2, ds)
                                                                                     return (Just state2)
                                                                             Nothing -> return Nothing)
-                                                             (I.zipWithMaybeAMatched $ \_ (_, (rid1, rframe1)) intPatch ->
-                                                                       do nested1 <- lift . sample $ nestedRFrames rframe1
+                                                             (I.zipWithMaybeAMatched $ \_ (_, (_, bfin1)) intPatch ->
+                                                                       do fin1 <- lift . sample $ bfin1
                                                                           case intPatch of
-                                                                               Just state2@(_, (rid2, rframe2)) ->
-                                                                                  do modify $ \(as, ds) -> ( as >> allocateRFrame rid2 rframe2
-                                                                                                           , deallocateRFrame rid1 nested1 >> ds )
+                                                                               Just state2@(_, (in2, _)) ->
+                                                                                  do modify $ \(as, ds) -> (as >> in2, fin1 >> ds)
                                                                                      return (Just state2)
                                                                                Nothing ->
-                                                                                  do modify $ \(as, ds) -> (as, deallocateRFrame rid1 nested1 >> ds)
+                                                                                  do modify $ \(as, ds) -> (as, fin1 >> ds)
                                                                                      return Nothing)
                                                              states patch
                                        return (states', ds >> as)
@@ -527,18 +507,16 @@ unsafeTraverseIntMapWithKeyWithAdjust f im0 im' =
                                 [sExtra] im'
                                            
        performEvent_ ev'
-       ownRid <- getFreshId
+       newRFrame
        ResourceT . modify $ \(supply, rframe) -> ( supply
-                                                 , rframe { allocations = mempty
-                                                          , nestedAllocations = do allocateRFrame ownRid rframe
-                                                                                   mapM_ (\(_, (rid0, rframe0)) -> allocateRFrame rid0 rframe0)
-                                                                                         statem0
-                                                          , nestedRFrames = do ownNestedRFrames <- nestedRFrames rframe
-                                                                               states' <- fmap I.elems statem'
-                                                                               nestedRFrames' <- mapM (\(_, (rid', rframe')) ->
-                                                                                                        fmap (rid' :) $ nestedRFrames rframe')
-                                                                                                      states'
-                                                                               return $ concat nestedRFrames' ++ (ownRid : ownNestedRFrames)
+                                                 , rframe { initialization = do initialization rframe
+                                                                                mapM_ (\(_, (in0, _)) -> in0)
+                                                                                      statem0
+                                                          , finalization = do finm <- finalization rframe
+                                                                              states' <- fmap I.elems statem'
+                                                                              finm' <- mapM (\(_, (_, fin')) -> fin')
+                                                                                            states'
+                                                                              return $ sequence_ finm' >> finm
                                                           }
                                                  )
 
@@ -598,7 +576,7 @@ traverseIntMapWithKeyWithAdjustDynRes' f im0 im' = do (resm0, resm') <- unsafeTr
                                                                                  (snd <$> resm0) (fmap snd <$> resm')
                                                       return (fst <$> resm0, fmap fst <$> resm', dynres)
 
-newtype RunRFrameResult t m v a = RunRFrameResult (v a, (Supply, (RFrameId, RFrame (Allocation m) m t)))
+newtype RunRFrameResult t m v a = RunRFrameResult (v a, (Supply, (m (), Behavior t (m ()))))
 newtype RunRFrameArgument v a = RunRFrameArgument (Supply, v a)
 newtype DMapResResult v vr a = DMapResResult (v a, vr a)
 
@@ -608,7 +586,7 @@ fstDMapResResult (DMapResResult (v, _)) = v
 sndDMapResResult :: DMapResResult v vr a -> vr a
 sndDMapResResult (DMapResResult (_, r)) = r
 
-unsafeTraverseDMapWithKeyWithAdjustWithMove :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate (Performable m), GCompare k)
+unsafeTraverseDMapWithKeyWithAdjustWithMove :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate m, Monad (Performable m), GCompare k)
                                             => (forall a. k a -> v a -> ResourceT r t m (v' a))
                                             -> D.DMap k v
                                             -> Event t (D.PatchDMapWithMove k v)
@@ -623,17 +601,16 @@ unsafeTraverseDMapWithKeyWithAdjustWithMove f im0 im' =
            (statem', ev') <- mapAccumMB (\states wpatch@(M.PatchMapWithMove patch) ->
                                     do (as, ds) <- flip execStateT (return (), return ()) $ flip M.traverseWithKey patch $
                                             \k p@(M.NodeInfo from to) -> case (M.lookup k states, from, to) of
-                                                                            (Just (_, (rid1, rframe1)), M.From_Delete, Nothing) ->
-                                                                                do nested1 <- lift . sample $ nestedRFrames rframe1
-                                                                                   modify $ \(as, ds) -> (as, deallocateRFrame rid1 nested1 >> ds)
+                                                                            (Just (_, (_, bfin1)), M.From_Delete, Nothing) ->
+                                                                                do fin1 <- lift $ sample bfin1
+                                                                                   modify $ \(as, ds) -> (as, fin1 >> ds)
                                                                                    return p
-                                                                            (Just (_, (rid1, rframe1)), M.From_Insert (_, (rid2, rframe2)), _) ->
-                                                                                do nested1 <- lift . sample $ nestedRFrames rframe1
-                                                                                   modify $ \(as, ds) -> ( as >> allocateRFrame rid2 rframe2
-                                                                                                         , deallocateRFrame rid1 nested1 >> ds )
+                                                                            (Just (_, (_, bfin1)), M.From_Insert (_, (in2, _)), _) ->
+                                                                                do fin1 <- lift $ sample bfin1
+                                                                                   modify $ \(as, ds) -> (as >> in2, fin1 >> ds)
                                                                                    return p
-                                                                            (Nothing, M.From_Insert (_, (rid2, rframe2)), _) ->
-                                                                                do modify $ \(as, ds) -> (as >> allocateRFrame rid2 rframe2, ds)
+                                                                            (Nothing, M.From_Insert (_, (in2, _)), _) ->
+                                                                                do modify $ \(as, ds) -> (as >> in2, ds)
                                                                                    return p
                                                                             _ -> return p
                                        return (fromMaybe states $ Patch.apply wpatch states, ds >> as)
@@ -659,17 +636,14 @@ unsafeTraverseDMapWithKeyWithAdjustWithMove f im0 im' =
        performEvent_ ev'
        ownRid <- getFreshId
        ResourceT . modify $ \(supply, rframe) -> ( supply
-                                                 , rframe { allocations = mempty
-                                                          , nestedAllocations = do allocateRFrame ownRid rframe
-                                                                                   _ <- M.traverseWithKey (\_ (_, (rid0, rframe0)) -> allocateRFrame rid0 rframe0)
-                                                                                                          statem0
-                                                                                   return ()
-                                                          , nestedRFrames = do ownNestedRFrames <- nestedRFrames rframe
-                                                                               states' <- M.elems <$> statem'
-                                                                               nestedRFrames' <- mapM (\(_, (rid', rframe')) ->
-                                                                                                        fmap (rid' :) $ nestedRFrames rframe')
-                                                                                                      states'
-                                                                               return $ concat nestedRFrames' ++ (ownRid : ownNestedRFrames)
+                                                 , rframe { initialization = do initialization rframe
+                                                                                M.traverseWithKey (\_ (_, (in0, _)) -> in0) statem0
+                                                                                return ()
+                                                          , finalization = do finm <- finalization rframe
+                                                                              states' <- fmap M.elems statem'
+                                                                              finm' <- mapM (\(_, (_, fin')) -> fin')
+                                                                                            states'
+                                                                              return $ sequence_ finm' >> finm
                                                           }
                                                  )
 
@@ -732,7 +706,8 @@ traverseDMapWithKeyWithAdjustWithMoveDynRes' f im0 im' = do (resm0, resm') <- un
                                                                                        (D.map sndDMapResResult resm0) (D.mapPatchDMapWithMove sndDMapResResult <$> resm')
                                                             return (D.map fstDMapResResult resm0, D.mapPatchDMapWithMove fstDMapResResult <$> resm', dynres)
 
-instance (MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate (Performable m), Adjustable t m) => Adjustable t (ResourceT () t m) where
+instance (MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate m, Monad (Performable m), Adjustable t m) => Adjustable t (ResourceT () t m) where
     runWithReplace = unsafeRunWithReplace
     traverseIntMapWithKeyWithAdjust = unsafeTraverseIntMapWithKeyWithAdjust
     traverseDMapWithKeyWithAdjustWithMove = unsafeTraverseDMapWithKeyWithAdjustWithMove
+

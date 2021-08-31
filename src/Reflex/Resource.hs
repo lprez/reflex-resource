@@ -4,7 +4,6 @@ module Reflex.Resource (
     runResourceT,
     runResourceTContext,
     allocate,
-    allocateFreshId,
     resourceContext,
     -- resourceContextRes,
     -- resourceContextRes',
@@ -36,7 +35,6 @@ module Reflex.Resource (
     TmpResourceContext,
     withTmpContext,
     allocateTmp,
-    allocateFreshIdTmp,
     -- ** Other
     getFreshId,
     getNewSupply,
@@ -76,9 +74,6 @@ module Reflex.Resource (
     withDynResReplace',
     -- ** Dynamic-like operations
     module Reflex.Resource.DynRes,
-    -- * MonadAllocate
-    RFrameId,
-    MonadAllocate(..),
 ) where
 
 import Reflex.Resource.DynRes
