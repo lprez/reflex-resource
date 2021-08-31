@@ -35,9 +35,6 @@ module Reflex.Resource (
     TmpResourceContext,
     withTmpContext,
     allocateTmp,
-    -- ** Other
-    getFreshId,
-    getNewSupply,
 
     -- * Res monad
     Res,
@@ -49,10 +46,12 @@ module Reflex.Resource (
     toRes,
     fromRes,
     -- ** Adjustable-like operations
+    withMaybeRes,
+    withMaybeRes',
+    withEitherRes,
+    withEitherRes',
     whenRes,
     whenRes',
-    ifThenElseRes,
-    ifThenElseRes',
     -- * DynRes monad
     DynRes,
     dynRes,
@@ -65,10 +64,12 @@ module Reflex.Resource (
     fromDynRes,
     sampleUnRes,
     -- ** Conditional resources
+    withMaybeDynRes,
+    withMaybeDynRes',
+    withEitherDynRes,
+    withEitherDynRes',
     whenDynRes,
     whenDynRes',
-    ifThenElseDynRes,
-    ifThenElseDynRes',
     -- ** Adjustable-like operations
     withDynResReplace,
     withDynResReplace',

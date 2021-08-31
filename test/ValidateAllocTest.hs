@@ -3,7 +3,6 @@
 module Main (main) where
 
 import Control.Applicative
-import Control.Concurrent.Supply
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Fix
@@ -61,8 +60,7 @@ run :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadSample
     => Event t Bool
     -> (forall r. ResourceContext () r => ValidateT r t m (Res r (ValidateAllocT (Performable m) Bool)))
     -> m (Performable m (), Performable m ())
-run exec act = do supply <- liftIO newSupply
-                  (as, ds) <- runValidateAllocTIO $ do (cmd, _, as, ds) <- runResourceTContext supply act
+run exec act = do (as, ds) <- runValidateAllocTIO $ do (cmd, as, ds) <- runResourceTContext act
                                                        performEvent_ (fmapCheap (\end -> if end then checkLeaks else checkSafe cmd) exec)
                                                        (as, ds) <- unwrapValidateAllocT $ \f -> (f as, fmap f ds)
                                                        return (as, ds)

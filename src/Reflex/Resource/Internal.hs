@@ -4,7 +4,6 @@
 module Reflex.Resource.Internal where
 
 import Control.Applicative
-import Control.Concurrent.Supply
 import Control.Monad.Trans
 import Control.Monad.State.Lazy
 import Data.Maybe
@@ -141,7 +140,7 @@ data RFrame m t = RFrame { allocations :: Allocation m          -- ^ Pending all
                          , finalization :: Behavior t (Performable m ())
                          }
 
-newtype ResourceT r t m a = ResourceT { unResourceT :: StateT (Supply, RFrame m t) m a }
+newtype ResourceT r t m a = ResourceT { unResourceT :: StateT (RFrame m t) m a }
     deriving (Functor, Applicative, Monad, MonadIO, MonadFix)
 
 data InternalResourceContext r
@@ -175,47 +174,38 @@ instance PerformEvent t m => PerformEvent t (ResourceT r t m) where
     performEvent = lift . performEvent
 
 runRFrame :: (Monad m, Reflex t, Monad (Performable m), MonadAllocate m)
-          => Supply
-          -> ResourceT r t m a
-          -> m (a, (Supply, (Performable m (), Behavior t (Performable m ()))))
-runRFrame supply r = do (x, (supply', rframe)) <- runStateT (unResourceT $ r <* newRFrame)
-                                                            (supply, emptyRFrame)
-                        return (x, (supply', (initialization rframe, finalization rframe)))
+          => ResourceT r t m a
+          -> m (a, (Performable m (), Behavior t (Performable m ())))
+runRFrame r = do (x, rframe) <- runStateT (unResourceT $ r <* newRFrame)
+                                          emptyRFrame
+                 return (x, (initialization rframe, finalization rframe))
     where emptyRFrame = RFrame mempty (return ()) (constant (return ()))
 
 -- | Allocate the current frame and start a new one.
-newRFrame :: (Reflex t, Monad m, MonadAllocate m, Monad (Performable m)) => ResourceT r t m ()
-newRFrame = do (_, rframe) <- ResourceT get
+newRFrame :: (Reflex t, Monad m, MonadAllocate m, Monad (Performable m))
+          => ResourceT r t m ()
+newRFrame = do rframe <- ResourceT get
                (inm, finm) <- lift $ createFrame (allocations rframe)
-               ResourceT . modify $ \(supply, _) -> ( supply
-                                                    , rframe { allocations = mempty
-                                                             , initialization = initialization rframe >> inm
-                                                             , finalization = (finm >>) <$> finalization rframe
-                                                             }
-                                                    )
-getFreshId :: Monad m => ResourceT r t m Int
-getFreshId = ResourceT $ state (\(supply, rframe) -> let (rid, supply') = freshId supply in (rid, (supply', rframe)))
-
-getNewSupply :: Monad m => ResourceT r t m Supply
-getNewSupply = ResourceT $ state (\(supply, rframe) -> let (s1, s2) = splitSupply supply in (s1, (s2, rframe)))
+               ResourceT . put $  rframe { allocations = mempty
+                                         , initialization = initialization rframe >> inm
+                                         , finalization = fmap (finm >>) (finalization rframe)
+                                         }
 
 -- | Run a ResourceT computation, returning the result of the computation, the initialization action
 -- and a sampling action that returns the final deallocations. @'Performable' m@ actions that access
 -- resources must not be scheduled before the initialization or after the deallocation.
 runResourceT :: (Reflex t, Monad m, MonadAllocate m, MonadSample t m', Monad (Performable m))
-             => Supply
-             -> ResourceT r t m a
-             -> m (a, Supply, Performable m (), m' (Performable m ()))
-runResourceT supply r = do (x, (supply', (inm, finm))) <- runRFrame supply r
-                           return (x, supply', inm, sample finm)
+             => ResourceT r t m a
+             -> m (a, Performable m (), m' (Performable m ()))
+runResourceT r = do (x, (inm, finm)) <- runRFrame r
+                    return (x, inm, sample finm)
 
 -- | Run a ResourceT computation in a 'ResourceContext', allowing you to return resources.
 -- Resources referred to by the @Res@ value must not be used before the allocation or after the deallocation.
 runResourceTContext :: (Reflex t, Monad m, MonadAllocate m, MonadSample t m', Monad (Performable m))
-                    => Supply
-                    -> (forall r'. ResourceContext () r' => ResourceT r' t m (Res r' a))
-                    -> m (a, Supply, Performable m (), m' (Performable m ()))
-runResourceTContext s f = runResourceT s (unRes <$> f @(InternalResourceContext ()))
+                    => (forall r'. ResourceContext () r' => ResourceT r' t m (Res r' a))
+                    -> m (a, Performable m (), m' (Performable m ()))
+runResourceTContext f = runResourceT (unRes <$> f @(InternalResourceContext ()))
 
 
 -- | Run a ResourceT computation in a context in which resources can be allocated.
@@ -264,9 +254,9 @@ allocate :: (ResourceContext rp r, MonadAllocate m, Monad m)
          => m (Res r (a, Allocation m))
          -> ResourceT r t m (Res r a)
 allocate mkAllocation = do Res (x, newAllocations) <- lift mkAllocation
-                           ResourceT . modify $ \(supply, rframe) ->
+                           ResourceT . modify $ \rframe ->
                                 let allocations' = allocations rframe <> newAllocations
-                                in (supply, rframe { allocations = allocations' })
+                                in rframe { allocations = allocations' }
                            return (Res x)
 
 -- | Allocate a new resource.
@@ -283,19 +273,16 @@ withTmpContext :: (Reflex t, MonadSample t m, MonadSample t (Performable m), Mon
                -> (forall r'. ResourceContext r r' => Res (TmpResourceContext r') x -> ResourceT r' t m (Res r' b))
                   -- ^ Context in which the temporary resources are used.
                -> ResourceT r t m (Res r b)
-withTmpContext t f = do supply <- fst <$> ResourceT get
-                        (Res act, supply', tinm, tsfinm) <- lift $ runResourceT supply (t @(InternalResourceContext _))
-                        (Res x, (supply'', (inm, bfinm))) <- lift $ runRFrame supply' $ (f @(InternalResourceContext _)) (Res act)
-                        tfinm <- tsfinm
+withTmpContext t f = do (Res act, (tinm, tbfinm)) <- lift . runRFrame $ (t @(InternalResourceContext _))
+                        (Res x, (inm, bfinm)) <- lift . runRFrame $ (f @(InternalResourceContext _)) (Res act)
+                        tfinm <- sample tbfinm
                         newRFrame
-                        ResourceT . modify $ \(_, rframe) -> ( supply''
-                                                             , rframe { initialization = do initialization rframe
-                                                                                            tinm
-                                                                                            inm
-                                                                                            tfinm
-                                                                      , finalization = (>>) <$> bfinm <*> finalization rframe
-                                                                      }
-                                                             )
+                        ResourceT . modify $ \rframe -> rframe { initialization = do initialization rframe
+                                                                                     tinm
+                                                                                     inm
+                                                                                     tfinm
+                                                               , finalization = (>>) <$> bfinm <*> finalization rframe
+                                                               }
                         return (Res x)
 
 unsafeRunWithReplace :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadAllocate m, Monad (Performable m))
@@ -303,25 +290,21 @@ unsafeRunWithReplace :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent
                      -> Event t (ResourceT r t m b)
                      -> ResourceT r t m (a, Event t b)
 unsafeRunWithReplace r0 ev =
-    do sInit0 <- getNewSupply
-       rec ((x, state0@(_, (in0, _))), res') <- lift $ runWithReplace (runRFrame sInit0 r0)
-                                                                      (uncurry runRFrame <$> attach supply' ev)
-           (state', ev') <- mapAccumMB (\(_, (_, bfin1)) state2@(_, (in2, _)) ->
-                                            do fin1 <- sample bfin1
-                                               return (state2, fin1 >> in2))
-                                       state0
-                                       (fmapCheap snd res')
-           let supply' = fmap fst state'
+    do ((x, state0@(in0, _)), res') <- lift $ runWithReplace (runRFrame r0)
+                                                             (runRFrame <$> ev)
+       (state', ev') <- mapAccumMB (\(_, bfin1) state2@(in2, _) ->
+                                        do fin1 <- sample bfin1
+                                           return (state2, fin1 >> in2))
+                                   state0
+                                   (fmapCheap snd res')
        performEvent_ ev'
        newRFrame
-       ResourceT . modify $ \(supply, rframe) -> ( supply
-                                                 , rframe { initialization = initialization rframe >> in0
-                                                          , finalization = do (_, (_, bfin')) <- state'
-                                                                              fin' <- bfin'
-                                                                              finm <- finalization rframe
-                                                                              return $ fin' >> finm
-                                                          }
-                                                 )
+       ResourceT . modify $ \rframe -> rframe { initialization = initialization rframe >> in0
+                                              , finalization = do (_, bfin') <- state'
+                                                                  fin' <- bfin'
+                                                                  finm <- finalization rframe
+                                                                  return $ fin' >> finm
+                                              }
        return (x, fmap fst res')
 
 type ReplaceableResourceContext rp r t m = ( Adjustable t m, MonadHold t m
@@ -330,79 +313,124 @@ type ReplaceableResourceContext rp r t m = ( Adjustable t m, MonadHold t m
                                            , Monad (Performable m)
                                            )
 
+-- | Select between two actions based on the value of a 'Res'.
+withEitherRes :: ResourceContext rp r
+              => Res r (Either a b)
+              -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m c)
+              -> (forall r'. ResourceContext r r' => Res r' b -> ResourceT r' t m c)
+              -> ResourceT r t m c
+withEitherRes (Res (Left x)) l _ = resourceContext $ l (Res x)
+withEitherRes (Res (Right x)) _ r = resourceContext $ r (Res x)
+
+-- | Same as 'withEitherRes', but you can return resources wrapped in a 'Res'.
+withEitherRes' :: (Monad m, ResourceContext rp r)
+               => Res r (Either a b)
+               -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m (c, Res r' d))
+               -> (forall r'. ResourceContext r r' => Res r' b -> ResourceT r' t m (c, Res r' d))
+               -> ResourceT r t m (c, Res r d)
+withEitherRes' (Res (Left x)) l _ = resourceContextRes' $ l (Res x)
+withEitherRes' (Res (Right x)) _ r = resourceContextRes' $ r (Res x)
+
 -- | Select between two actions based on the availability of a 'Res'.
-ifThenElseRes :: ResourceContext rp r
+withMaybeRes :: ResourceContext rp r
+             => Res r (Maybe a)
+             -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m b)
+             -> (forall r'. ResourceContext r r' => ResourceT r' t m b)
+             -> ResourceT r t m b
+withMaybeRes (Res (Just x)) y _ = resourceContext $ y (Res x)
+withMaybeRes (Res Nothing) _ n = resourceContext n
+
+-- | Same as 'withMaybeRes', but you can return resources wrapped in a 'Res'.
+withMaybeRes' :: (Monad m, ResourceContext rp r)
               => Res r (Maybe a)
-              -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m b)
-              -> (forall r'. ResourceContext r r' => ResourceT r' t m b)
-              -> ResourceT r t m b
-ifThenElseRes (Res (Just x)) y _ = resourceContext $ y (Res x)
-ifThenElseRes (Res Nothing) _ n = resourceContext n
+              -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m (b, Res r' c))
+              -> (forall r'. ResourceContext r r' => ResourceT r' t m (b, Res r' c))
+              -> ResourceT r t m (b, Res r c)
+withMaybeRes' (Res (Just x)) y _ = resourceContextRes' $ y (Res x)
+withMaybeRes' (Res Nothing) _ n = resourceContextRes' n
 
--- | Same as 'ifThenElseRes', but you can return resources wrapped in a 'Res'.
-ifThenElseRes' :: (Monad m, ResourceContext rp r)
-               => Res r (Maybe a)
-               -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m (b, Res r' c))
-               -> (forall r'. ResourceContext r r' => ResourceT r' t m (b, Res r' c))
-               -> ResourceT r t m (b, Res r c)
-ifThenElseRes' (Res (Just x)) y _ = resourceContextRes' $ y (Res x)
-ifThenElseRes' (Res Nothing) _ n = resourceContextRes' n
-
--- | 'ifThenElseRes' without an alternative action.
+-- | 'withMaybeRes' without an alternative action.
 whenRes :: (Monad m, ResourceContext rp r)
         => Res r (Maybe a)
         -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m b)
         -> ResourceT r t m (Maybe b)
-whenRes res f = ifThenElseRes res (fmap Just . f) (return Nothing)
+whenRes res f = withMaybeRes res (fmap Just . f) (return Nothing)
 
--- | 'ifThenElseRes\'' without an alternative action.
+-- | 'withMaybeRes\'' without an alternative action.
 whenRes' :: (Monad m, ResourceContext rp r)
          => Res r (Maybe a)
          -> (forall r'. ResourceContext r r' => Res r' a -> ResourceT r' t m (b, Res r' c))
          -> ResourceT r t m (Maybe b, Res r (Maybe c))
-whenRes' res f = ifThenElseRes' res (fmap (\(a, b) -> (Just a, fmap Just b)) . f) (return (Nothing, pure Nothing))
+whenRes' res f = withMaybeRes' res (fmap (\(a, b) -> (Just a, fmap Just b)) . f) (return (Nothing, pure Nothing))
 
 -- | Switch between two actions based on the availability of a 'DynRes'. Note that this will continuosly allocate
 -- and deallocate the internal resources every time the @DynRes@ switches between @Just@ and @Nothing@. If you don't want this,
--- allocate them outside of the @ifThenElseDynRes@ call.
-ifThenElseDynRes :: ReplaceableResourceContext rp r t m
+-- allocate them outside of the @withMaybeDynRes@ call.
+withMaybeDynRes :: ReplaceableResourceContext rp r t m
+                => DynRes r t (Maybe a)
+                -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m b)
+                -> (forall r'. ResourceContext r r' => ResourceT r' t m b)
+                -> ResourceT r t m (Dynamic t b)
+withMaybeDynRes (DynRes dyn) y n = do mdyn <- maybeDyn dyn
+                                      initial <- sample (current mdyn)
+                                      (m0, m') <- runWithReplaceContext (maybe n (y . DynRes) initial)
+                                                                        (maybe n (y . DynRes) <$> updated mdyn)
+                                      holdDyn m0 m'
+
+-- | Same as 'withMaybeDynRes', but you can return resources wrapped in a 'DynRes'.
+withMaybeDynRes' :: ReplaceableResourceContext rp r t m
                  => DynRes r t (Maybe a)
-                 -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m b)
-                 -> (forall r'. ResourceContext r r' => ResourceT r' t m b)
-                 -> ResourceT r t m (Dynamic t b)
-ifThenElseDynRes (DynRes dyn) y n = do mdyn <- maybeDyn dyn
+                 -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m (b, DynRes r' t c))
+                 -> (forall r'. ResourceContext r r' => ResourceT r' t m (b, DynRes r' t c))
+                 -> ResourceT r t m (Dynamic t b, DynRes r t c)
+withMaybeDynRes' (DynRes dyn) y n = do mdyn <- maybeDyn dyn
                                        initial <- sample (current mdyn)
-                                       (m0, m') <- runWithReplaceContext (maybe n (y . DynRes) initial)
-                                                                         (maybe n (y . DynRes) <$> updated mdyn)
+                                       (m0, m', d) <- runWithReplaceDynRes' (maybe n (y . DynRes) initial)
+                                                                            (maybe n (y . DynRes) <$> updated mdyn)
+                                       m <- holdDyn m0 m'
+                                       return (m, d)
+
+-- | Switch between two actions based on the availability of a 'DynRes'. Note that this will continuosly allocate
+-- and deallocate the internal resources every time the @DynRes@ switches between @Just@ and @Nothing@. If you don't want this,
+-- allocate them outside of the @withMaybeDynRes@ call.
+withEitherDynRes :: ReplaceableResourceContext rp r t m
+                 => DynRes r t (Either a b)
+                 -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m c)
+                 -> (forall r'. ResourceContext r r' => DynRes r' t b -> ResourceT r' t m c)
+                 -> ResourceT r t m (Dynamic t c)
+withEitherDynRes (DynRes dyn) l r = do edyn <- eitherDyn dyn
+                                       initial <- sample (current edyn)
+                                       (m0, m') <- runWithReplaceContext (either (l . DynRes) (r . DynRes) initial)
+                                                                         (either (l . DynRes) (r . DynRes) <$> updated edyn)
                                        holdDyn m0 m'
 
--- | Same as 'ifThenElseDynRes', but you can return resources wrapped in a 'DynRes'.
-ifThenElseDynRes' :: ReplaceableResourceContext rp r t m
-                  => DynRes r t (Maybe a)
-                  -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m (b, DynRes r' t c))
-                  -> (forall r'. ResourceContext r r' => ResourceT r' t m (b, DynRes r' t c))
-                  -> ResourceT r t m (Dynamic t b, DynRes r t c)
-ifThenElseDynRes' (DynRes dyn) y n = do mdyn <- maybeDyn dyn
-                                        initial <- sample (current mdyn)
-                                        (m0, m', d) <- runWithReplaceDynRes' (maybe n (y . DynRes) initial)
-                                                                             (maybe n (y . DynRes) <$> updated mdyn)
+-- | Same as 'withEitherDynRes', but you can return resources wrapped in a 'DynRes'.
+withEitherDynRes' :: ReplaceableResourceContext rp r t m
+                 => DynRes r t (Either a b)
+                 -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m (c, DynRes r' t d))
+                 -> (forall r'. ResourceContext r r' => DynRes r' t b -> ResourceT r' t m (c, DynRes r' t d))
+                 -> ResourceT r t m (Dynamic t c, DynRes r t d)
+withEitherDynRes' (DynRes dyn) l r = do edyn <- eitherDyn dyn
+                                        initial <- sample (current edyn)
+                                        (m0, m', d) <- runWithReplaceDynRes' (either (l . DynRes) (r . DynRes) initial)
+                                                                             (either (l . DynRes) (r . DynRes) <$> updated edyn)
                                         m <- holdDyn m0 m'
                                         return (m, d)
 
 
--- | 'ifThenElseDynRes' without an alternative action.
+-- | 'withMaybeDynRes' without an alternative action.
 whenDynRes :: ReplaceableResourceContext rp r t m
            => DynRes r t (Maybe a)
            -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m b)
            -> ResourceT r t m (Dynamic t (Maybe b))
-whenDynRes dyn f = ifThenElseDynRes dyn (fmap Just . f) (return Nothing)
+whenDynRes dyn f = withMaybeDynRes dyn (fmap Just . f) (return Nothing)
 
--- | 'ifThenElseDynRes\'' without an alternative action.
+-- | 'withMaybeDynRes\'' without an alternative action.
 whenDynRes' :: ReplaceableResourceContext rp r t m
             => DynRes r t (Maybe a)
             -> (forall r'. ResourceContext r r' => DynRes r' t a -> ResourceT r' t m (b, DynRes r' t c))
             -> ResourceT r t m (Dynamic t (Maybe b), DynRes r t (Maybe c))
-whenDynRes' dyn f = ifThenElseDynRes' dyn (fmap (\(a, b) -> (Just a, fmap Just b)) . f) (return (Nothing, pure Nothing))
+whenDynRes' dyn f = withMaybeDynRes' dyn (fmap (\(a, b) -> (Just a, fmap Just b)) . f) (return (Nothing, pure Nothing))
 
 withDynResReplace :: ReplaceableResourceContext rp r t m
                   => DynRes r t a
@@ -469,56 +497,41 @@ unsafeTraverseIntMapWithKeyWithAdjust :: (Adjustable t m, MonadHold t m, MonadFi
                                       -> Event t (I.PatchIntMap v)
                                       -> ResourceT r t m (I.IntMap v', Event t (I.PatchIntMap v'))
 unsafeTraverseIntMapWithKeyWithAdjust f im0 im' =
-    do sInit0 <- getNewSupply
-       let (sExtra, sim0) = I.mapAccum (\s v -> let (s', se) = splitSupply s in (se, (s', v))) sInit0 im0
-       rec (resm0, resm') <- lift $ traverseIntMapWithKeyWithAdjust (\k (s, v) -> runRFrame s $ f k v) sim0 (fmap PatchIntMap sim')
-           let statem0 = fmap snd resm0
-           (statem', ev') <- mapAccumMB (\states (PatchIntMap patch) ->
-                                    do (states', (as, ds)) <- flip runStateT (return (), return ()) $
-                                                    I.mergeA I.preserveMissing
-                                                             (I.traverseMaybeMissing $ \_ intPatch ->
-                                                                       case intPatch of
-                                                                            Just state2@(_, (in2, _)) ->
-                                                                                 do modify $ \(as, ds) -> (as >> in2, ds)
-                                                                                    return (Just state2)
-                                                                            Nothing -> return Nothing)
-                                                             (I.zipWithMaybeAMatched $ \_ (_, (_, bfin1)) intPatch ->
-                                                                       do fin1 <- lift . sample $ bfin1
-                                                                          case intPatch of
-                                                                               Just state2@(_, (in2, _)) ->
-                                                                                  do modify $ \(as, ds) -> (as >> in2, fin1 >> ds)
-                                                                                     return (Just state2)
-                                                                               Nothing ->
-                                                                                  do modify $ \(as, ds) -> (as, fin1 >> ds)
-                                                                                     return Nothing)
-                                                             states patch
-                                       return (states', ds >> as)
-                                            ) statem0 (fmap (fmap snd) resm')
-           sim' <- mapAccumM_ (\se0 (PatchIntMap patchm) -> sample statem' >>= \statemCurrent -> return $
-                        I.mapAccumWithKey (\se k p -> case (I.lookup k statemCurrent, se, p) of
-                                                           (Nothing, _, Nothing) -> (se, Nothing)
-                                                           (Just (s, _), _, Nothing) | length se < 100 -> (s : se, Nothing)
-                                                                                                | otherwise -> (se, Nothing)
-                                                           (Nothing, s : se'@(_ : _), Just v) -> (se', Just (s, v))
-                                                           (Nothing, s : [], Just v) -> let (s', se') = splitSupply s in ([se'], Just (s', v))
-                                                           (Nothing, [], Just _) -> error "supply"
-                                                           (Just (s, _), _, Just v) -> (se, Just (s, v)))
-                                          se0 patchm)
-                                [sExtra] im'
-                                           
+    do (resm0, resm') <- lift $ traverseIntMapWithKeyWithAdjust (\k v -> runRFrame $ f k v) im0 im'
+       let statem0 = fmap snd resm0
+       (statem', ev') <- mapAccumMB (\states (PatchIntMap patch) ->
+                                do (states', (as, ds)) <- flip runStateT (return (), return ()) $
+                                                I.mergeA I.preserveMissing
+                                                         (I.traverseMaybeMissing $ \_ intPatch ->
+                                                                   case intPatch of
+                                                                        Just state2@(in2, _) ->
+                                                                             do modify $ \(as, ds) -> (as >> in2, ds)
+                                                                                return (Just state2)
+                                                                        Nothing -> return Nothing)
+                                                         (I.zipWithMaybeAMatched $ \_ (_, bfin1) intPatch ->
+                                                                   do fin1 <- lift . sample $ bfin1
+                                                                      case intPatch of
+                                                                           Just state2@(in2, _) ->
+                                                                              do modify $ \(as, ds) -> (as >> in2, fin1 >> ds)
+                                                                                 return (Just state2)
+                                                                           Nothing ->
+                                                                              do modify $ \(as, ds) -> (as, fin1 >> ds)
+                                                                                 return Nothing)
+                                                         states patch
+                                   return (states', ds >> as)
+                                        ) statem0 (fmap (fmap snd) resm')
+                                       
        performEvent_ ev'
        newRFrame
-       ResourceT . modify $ \(supply, rframe) -> ( supply
-                                                 , rframe { initialization = do initialization rframe
-                                                                                mapM_ (\(_, (in0, _)) -> in0)
-                                                                                      statem0
-                                                          , finalization = do finm <- finalization rframe
-                                                                              states' <- fmap I.elems statem'
-                                                                              finm' <- mapM (\(_, (_, fin')) -> fin')
-                                                                                            states'
-                                                                              return $ sequence_ finm' >> finm
-                                                          }
-                                                 )
+       ResourceT . modify $ \rframe -> rframe { initialization = do initialization rframe
+                                                                    mapM_ (\(in0, _) -> in0)
+                                                                          statem0
+                                              , finalization = do finm <- finalization rframe
+                                                                  states' <- fmap I.elems statem'
+                                                                  finm' <- mapM (\(_, fin') -> fin')
+                                                                                states'
+                                                                  return $ sequence_ finm' >> finm
+                                              }
 
        return (fmap fst resm0, fmap (fmap fst) resm')
 
@@ -576,8 +589,7 @@ traverseIntMapWithKeyWithAdjustDynRes' f im0 im' = do (resm0, resm') <- unsafeTr
                                                                                  (snd <$> resm0) (fmap snd <$> resm')
                                                       return (fst <$> resm0, fmap fst <$> resm', dynres)
 
-newtype RunRFrameResult t m v a = RunRFrameResult (v a, (Supply, (m (), Behavior t (m ()))))
-newtype RunRFrameArgument v a = RunRFrameArgument (Supply, v a)
+newtype RunRFrameResult t m v a = RunRFrameResult (v a, (m (), Behavior t (m ())))
 newtype DMapResResult v vr a = DMapResResult (v a, vr a)
 
 fstDMapResResult :: DMapResResult v vr a -> v a
@@ -592,60 +604,38 @@ unsafeTraverseDMapWithKeyWithAdjustWithMove :: (Adjustable t m, MonadHold t m, M
                                             -> Event t (D.PatchDMapWithMove k v)
                                             -> ResourceT r t m (D.DMap k v', Event t (D.PatchDMapWithMove k v'))
 unsafeTraverseDMapWithKeyWithAdjustWithMove f im0 im' =
-    do sInit0 <- getNewSupply
-       let (sExtra, sim0) = D.mapAccumLWithKey (\s _ v -> let (s', se) = splitSupply s in (se, RunRFrameArgument (s', v))) sInit0 im0
-       rec (resm0, resm') <- lift $ traverseDMapWithKeyWithAdjustWithMove (\k (RunRFrameArgument (s, v)) -> fmap RunRFrameResult . runRFrame s $ f k v)
-                                                                          sim0 sim'
-           let statem0 = weakenDMapWith (\(RunRFrameResult (_, s)) -> s) resm0
-               patchStatem' = weakenPatchDMapWithMoveWith (\(RunRFrameResult (_, s)) -> s) <$> resm'
-           (statem', ev') <- mapAccumMB (\states wpatch@(M.PatchMapWithMove patch) ->
-                                    do (as, ds) <- flip execStateT (return (), return ()) $ flip M.traverseWithKey patch $
-                                            \k p@(M.NodeInfo from to) -> case (M.lookup k states, from, to) of
-                                                                            (Just (_, (_, bfin1)), M.From_Delete, Nothing) ->
-                                                                                do fin1 <- lift $ sample bfin1
-                                                                                   modify $ \(as, ds) -> (as, fin1 >> ds)
-                                                                                   return p
-                                                                            (Just (_, (_, bfin1)), M.From_Insert (_, (in2, _)), _) ->
-                                                                                do fin1 <- lift $ sample bfin1
-                                                                                   modify $ \(as, ds) -> (as >> in2, fin1 >> ds)
-                                                                                   return p
-                                                                            (Nothing, M.From_Insert (_, (in2, _)), _) ->
-                                                                                do modify $ \(as, ds) -> (as >> in2, ds)
-                                                                                   return p
-                                                                            _ -> return p
-                                       return (fromMaybe states $ Patch.apply wpatch states, ds >> as)
-                                            ) statem0 patchStatem'
-           sim' <- mapAccumM_ (\se0 (D.PatchDMapWithMove patchm) -> sample statem' >>= \statemCurrent -> return . (\(s, m) -> (s, D.PatchDMapWithMove m)) $
-                        D.mapAccumRWithKey (\se k (D.NodeInfo from to) ->
-                                                case (M.lookup (mkSome k) statemCurrent, se, from) of
-                                                     (Nothing, _, D.From_Delete) -> (se, D.NodeInfo D.From_Delete to)
-                                                     (Just (s, _), _, D.From_Delete) | ComposeMaybe (Just _) <- to -> (se, D.NodeInfo D.From_Delete to)
-                                                                                     | length se < 100 -> (s : se, D.NodeInfo D.From_Delete to)
-                                                                                     | otherwise -> (se, D.NodeInfo D.From_Delete to)
-                                                     (Nothing, s : se'@(_ : _), D.From_Insert v) -> (se', D.NodeInfo (D.From_Insert $ RunRFrameArgument (s, v)) to)
-                                                     (Nothing, s : [], D.From_Insert v) -> let (s', se') = splitSupply s
-                                                                                           in ([se'], D.NodeInfo (D.From_Insert (RunRFrameArgument (s', v))) to)
-                                                     (Nothing, [], D.From_Insert _) -> error "supply"
-                                                     (Just (s, _), _, D.From_Insert v) -> (se, D.NodeInfo (D.From_Insert $ RunRFrameArgument (s, v)) to)
-                                                     (Nothing, _, D.From_Move k') -> (se, D.NodeInfo (D.From_Move k') to)
-                                                     (Just _, _, D.From_Move k') -> (se, D.NodeInfo (D.From_Move k') to)
-                                                     -- (Just (s, _), _, D.From_Move k') -> (s : se, M.NodeInfo (M.From_Move k') to)
-                                           ) se0 patchm)
-                                [sExtra] im'
-                                           
+    do (resm0, resm') <- lift $ traverseDMapWithKeyWithAdjustWithMove (\k v -> fmap RunRFrameResult . runRFrame $ f k v)
+                                                                      im0 im'
+       let statem0 = weakenDMapWith (\(RunRFrameResult (_, s)) -> s) resm0
+           patchStatem' = weakenPatchDMapWithMoveWith (\(RunRFrameResult (_, s)) -> s) <$> resm'
+       (statem', ev') <- mapAccumMB (\states wpatch@(M.PatchMapWithMove patch) ->
+                                do (as, ds) <- flip execStateT (return (), return ()) $ flip M.traverseWithKey patch $
+                                        \k p@(M.NodeInfo from to) -> case (M.lookup k states, from, to) of
+                                                                        (Just (_, bfin1), M.From_Delete, Nothing) ->
+                                                                            do fin1 <- lift $ sample bfin1
+                                                                               modify $ \(as, ds) -> (as, fin1 >> ds)
+                                                                               return p
+                                                                        (Just (_, bfin1), M.From_Insert (in2, _), _) ->
+                                                                            do fin1 <- lift $ sample bfin1
+                                                                               modify $ \(as, ds) -> (as >> in2, fin1 >> ds)
+                                                                               return p
+                                                                        (Nothing, M.From_Insert (in2, _), _) ->
+                                                                            do modify $ \(as, ds) -> (as >> in2, ds)
+                                                                               return p
+                                                                        _ -> return p
+                                   return (fromMaybe states $ Patch.apply wpatch states, ds >> as)
+                                        ) statem0 patchStatem'
        performEvent_ ev'
-       ownRid <- getFreshId
-       ResourceT . modify $ \(supply, rframe) -> ( supply
-                                                 , rframe { initialization = do initialization rframe
-                                                                                M.traverseWithKey (\_ (_, (in0, _)) -> in0) statem0
-                                                                                return ()
-                                                          , finalization = do finm <- finalization rframe
-                                                                              states' <- fmap M.elems statem'
-                                                                              finm' <- mapM (\(_, (_, fin')) -> fin')
-                                                                                            states'
-                                                                              return $ sequence_ finm' >> finm
-                                                          }
-                                                 )
+       newRFrame
+       ResourceT . modify $ \rframe -> rframe { initialization = do initialization rframe
+                                                                    M.traverseWithKey (\_ (in0, _) -> in0) statem0
+                                                                    return ()
+                                              , finalization = do finm <- finalization rframe
+                                                                  states' <- fmap M.elems statem'
+                                                                  finm' <- mapM (\(_, fin') -> fin')
+                                                                                states'
+                                                                  return $ sequence_ finm' >> finm
+                                              }
 
        return ( D.map (\(RunRFrameResult (x, _)) -> x) resm0
               , fmap (D.mapPatchDMapWithMove (\(RunRFrameResult (x, _)) -> x)) resm'
