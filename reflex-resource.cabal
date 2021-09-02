@@ -29,22 +29,25 @@ library
         containers ^>=0.6.4.1,
         reflex ^>=0.8.1.0,
         dependent-map ^>=0.4.0.0,
-        dependent-sum ^>=0.6.2.0,
+        dependent-sum ^>=0.7.1.0,
         patch ^>=0.0.4.0,
+        mmorph ^>=1.1.0
     hs-source-dirs:   src
     default-language: Haskell2010
 
 test-suite reflex-resource-test
     default-language: Haskell2010
     type:             exitcode-stdio-1.0
-    hs-source-dirs:   src test
+    hs-source-dirs:   test
     main-is:          ValidateAllocTest.hs
     build-depends:
-        base ^>=4.14.2.0,
-        mtl ^>=2.2.2,
-        containers ^>=0.6.4.1,
-        reflex ^>=0.8.1.0,
-        dependent-map ^>=0.4.0.0,
-        dependent-sum ^>=0.6.2.0,
-        patch ^>=0.0.4.0,
-        random ^>=1.1,
+        base,
+        mtl,
+        containers,
+        reflex,
+        dependent-map,
+        dependent-sum,
+        patch,
+        random,
+        reflex-resource
+    other-modules: ValidateAlloc

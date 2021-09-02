@@ -12,7 +12,6 @@ import Reflex.Adjustable.Class
 import Reflex.PerformEvent.Class
 import System.Random
 
-import Reflex.Resource
 import Reflex.Resource.Allocate
 
 type ValidateState = (S.IntSet, I.IntMap S.IntSet)
@@ -37,8 +36,8 @@ instance PerformEvent t m => PerformEvent t (ValidateAllocT m) where
     performEvent_ e = ValidateAllocT $ performEvent_ (fmap unValidateAllocT e)
     performEvent e = ValidateAllocT $ performEvent (fmap unValidateAllocT e)
 
-instance (MonadIO m, MonadIO (Performable m)) => MonadAllocate (ValidateAllocT m) where
-    type Allocation (ValidateAllocT m) = S.IntSet
+instance (MonadIO m, MonadIO pm) => MonadAllocate pm (ValidateAllocT m) where
+    type Allocation pm (ValidateAllocT m) = S.IntSet
     createFrame allocations = validateAllocT $ \stateRef ->
             do rid <- liftIO randomIO
                return ( liftIO . atomicModifyIORef' stateRef $
@@ -47,21 +46,12 @@ instance (MonadIO m, MonadIO (Performable m)) => MonadAllocate (ValidateAllocT m
                             \(resources, frames) -> ((S.difference resources (frames I.! rid), I.delete rid frames), ())
                       )
 
-newResource :: MonadIO m => m (Int, S.IntSet)
+newResource :: (MonadIO m, Applicative f) => m (Int, f S.IntSet)
 newResource = do rid <- liftIO randomIO
-                 return (rid, S.singleton rid)
+                 return (rid, pure $ S.singleton rid)
 
 checkResource :: MonadIO m => Int -> ValidateAllocT m Bool
 checkResource resid = validateAllocT $ \stateRef -> liftIO (readIORef stateRef) >>= \(resources, _) -> return $ S.member resid resources
-
-dynResourceSampler :: (Monad m, Reflex t, MonadSample t (Performable m), MonadIO (Performable m))
-                   => DynRes r t Int
-                   -> ResourceT r t (ValidateAllocT m) (Res r (Performable m Bool))
-dynResourceSampler x = do sampler <- dynResSampler x
-                          stateRef <- lift $ validateAllocT return
-                          return $ fmap (\sampler' -> do resid <- runValidateAllocT sampler' stateRef
-                                                         (resources, _) <- liftIO (readIORef stateRef)
-                                                         return $ S.member resid resources) sampler
 
 noLeaks :: MonadIO m => ValidateAllocT m Bool
 noLeaks = validateAllocT $ \stateRef -> liftIO $ readIORef stateRef >>=

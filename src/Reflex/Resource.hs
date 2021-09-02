@@ -1,16 +1,19 @@
 module Reflex.Resource (
     ResourceContext,
+    -- * ResourceT monad
+    ResourceT',
     ResourceT,
     runResourceT,
     runResourceTContext,
+    runResourceT',
+    runResourceTContext',
     allocate,
     resourceContext,
     -- resourceContextRes,
     -- resourceContextRes',
     -- resourceContextDynRes,
     -- resourceContextDynRes',
-    performEventRes,
-    performEventRes_,
+    hoistResourceT,
     -- ** Adjustable-like operations
     ReplaceableResourceContext,
     runWithReplaceContext,
@@ -38,43 +41,64 @@ module Reflex.Resource (
 
     -- * Res monad
     Res,
-    resSampler,
-    tmpRes,
-    tmpResSampler,
     castRes,
+    tmpRes,
     UnRes,
     toRes,
     fromRes,
-    -- ** Adjustable-like operations
+    mapUnRes,
+    -- *** Maybe resources
     withMaybeRes,
     withMaybeRes',
-    withEitherRes,
-    withEitherRes',
     whenRes,
     whenRes',
+    -- *** Either resources
+    withEitherRes,
+    withEitherRes',
     -- * DynRes monad
     DynRes,
     dynRes,
     dynResDyn,
-    dynResSampler,
     castDynRes,
     -- sampling,
     unwrapDynRes,
     toDynRes,
     fromDynRes,
     sampleUnRes,
-    -- ** Conditional resources
+    -- *** Maybe resources
     withMaybeDynRes,
     withMaybeDynRes',
-    withEitherDynRes,
-    withEitherDynRes',
     whenDynRes,
     whenDynRes',
-    -- ** Adjustable-like operations
+    -- *** Either resources
+    withEitherDynRes,
+    withEitherDynRes',
+    -- *** Adjustable-like operations
     withDynResReplace,
     withDynResReplace',
-    -- ** Dynamic-like operations
+    -- *** Dynamic-like operations
     module Reflex.Resource.DynRes,
+
+    -- * Using resources
+    --
+    -- | The functions provided in this section allow you to use the values inside of the 'Res'
+    -- monad and are potentially unsafe. For instance, writing the value to an @IORef@ and reading it
+    -- in a later Reflex frame is not safe.
+    
+    -- *** Inside of Performable
+    dynResSampler,
+    performEventRes_,
+    performEventRes,
+    -- *** Direct
+    --
+    -- | Note that these functions access the values contained in the 'Res' before
+    -- their associated initialization action has been run. Whether this makes sense or not
+    -- depends on the type of resources used and how you're using them.
+    withRes,
+    withRes_,
+    liftRes,
+    liftRes_,
+    unsafeUnDynRes
 ) where
 
 import Reflex.Resource.DynRes
