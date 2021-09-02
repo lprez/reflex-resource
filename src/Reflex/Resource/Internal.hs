@@ -168,21 +168,6 @@ hoistResourceT liftp f (ResourceT m) = ResourceT . StateT $ \rframe ->
     fmap (\(x, rframe') -> (x, rframe' { liftPerformable = liftPerformable rframe, allocations = allocations rframe' }))
          (f $ runStateT m (rframe { liftPerformable = liftp, allocations = allocations rframe }))
 
-{-
-hoistFrame :: (Reflex t, MonadAllocate (Performable m) m, MonadAllocate (Performable n) n, Monad (Performable n), Monad (Performable m))
-           => (forall a. Performable m a -> Performable n a)
-           -> (forall a. m a -> n a)
-           -> ResourceT r t m a
-           -> ResourceT r t n a
-hoistFrame pf f m =
-    do newRFrame
-       (x, (in', bfin')) <- lift . f $ liftInFin <$> runRFrame m
-       ResourceT . state $ \rframe -> (x, rframe { initialization = initialization rframe >> in'
-                                                 , finalization = (>>) <$> bfin' <*> finalization rframe
-                                                 })
-    where liftInFin (x, (i, f)) = (x, (pf i, pf <$> f))
--}
-
 instance MonadSample t m => MonadSample t (ResourceT' r t pm m) where
     sample = lift . sample
 

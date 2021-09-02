@@ -1,0 +1,30 @@
+cabal-version:      2.4
+name:               reflex-resource-examples
+version:            0.1.0.0
+synopsis:           reflex-resource examples
+-- description:
+homepage:           https://github.com/lprez/reflex-resource
+bug-reports:        https://github.com/lprez/reflex-resource/issues
+license:            BSD-2-Clause
+license-file:       LICENSE
+author:             Luca Prezzavento
+maintainer:         lucabprezzavento@gmail.com
+category:           FRP
+extra-source-files: README.md, CHANGELOG.md
+
+executable vtyexample
+    main-is:          VtyExample.hs
+    other-modules:    File, RIO
+    hs-source-dirs:   .
+    ghc-options:      -threaded
+    build-depends:
+        base ^>=4.14.2.0,
+        reflex-resource ^>= 0.1.0.0,
+        vty ^>=5.28.2,
+        reflex ^>= 0.8.1.0,
+        reflex-vty ^>= 0.1.4.2,
+        text ^>= 1.2.3,
+        containers ^>= 0.6.4.1,
+        mtl ^>=2.2.2,
+        mmorph ^>=1.1.0,
+        patch ^>= 0.0.4.0
