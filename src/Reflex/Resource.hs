@@ -55,6 +55,9 @@ module Reflex.Resource (
     -- *** Either resources
     withEitherRes,
     withEitherRes',
+    -- ** PerformEvent
+    performEventRes_,
+    performEventRes,
     -- * DynRes monad
     DynRes,
     dynRes,
@@ -78,27 +81,6 @@ module Reflex.Resource (
     withDynResReplace',
     -- *** Dynamic-like operations
     module Reflex.Resource.DynRes,
-
-    -- * Using resources
-    --
-    -- | The functions provided in this section allow you to use the values inside of the 'Res'
-    -- monad and are potentially unsafe. For instance, writing the value to an @IORef@ and reading it
-    -- in a later Reflex frame is not safe.
-    
-    -- *** Inside of Performable
-    dynResSampler,
-    performEventRes_,
-    performEventRes,
-    -- *** Direct
-    --
-    -- | Note that these functions access the values contained in the 'Res' before
-    -- their associated initialization action has been run. Whether this makes sense or not
-    -- depends on the type of resources used and how you're using them.
-    withRes,
-    withRes_,
-    liftRes,
-    liftRes_,
-    unsafeUnDynRes
 ) where
 
 import Reflex.Resource.DynRes

@@ -17,6 +17,7 @@ library
         Reflex.Resource
         Reflex.Resource.Allocate
         Reflex.Resource.DynRes
+        Reflex.Resource.Unsafe
     other-modules:
         Reflex.Resource.Internal
     other-extensions:

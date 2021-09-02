@@ -285,35 +285,8 @@ fmapResourceContextDynRes' r = fmap (\r' -> ResourceT (unResourceT (fmap (\(x, s
 performEventRes_ :: PerformEvent t m => Res r (Event t (Performable m ())) -> ResourceT' r t pm m ()
 performEventRes_ (Res x) = performEvent_ x
 
-performEventRes :: PerformEvent t m => Res r (Event t (Performable m a)) -> ResourceT' r t pm m (Event t (Res r a))
-performEventRes (Res x) = fmapCheap Res <$> performEvent x
-
--- | This function is provided for performance reasons, as 'DynRes' resources can be
--- used as 'Dynamic's with a combination of 'withDynResReplace' and 'withRes'. For instance,
--- if you need to pass a 'Dynamic' to a function from another library that also uses
--- Reflex, you could do this by continously replacing the function call using @withDynResReplace@
--- and giving it a constant @Dynamic@, but @unsafeUnDynRes@ allows to you give it the
--- @Dynamic@ directly. The reason it's unsafe is that a @DynRes@ may refer to different
--- transient resources over time, and some @Dynamic@ operations can retain resource handles/identifiers
--- and provide them at a time in which those resources have been finalized.
-unsafeUnDynRes :: Reflex t => DynRes r t a -> Res r (Dynamic t a)
-unsafeUnDynRes (DynRes x) = Res x
-
--- | Execute an operation that uses the value of a resource.
-withRes :: Monad m => Res r a -> (a -> ResourceT' r t pm m b) -> ResourceT' r t pm m (Res r b)
-withRes (Res x) f = Res <$> f x
-
--- | Execute an operation that uses the value of a resource.
-withRes_ :: Monad m => Res r a -> (a -> ResourceT' r t pm m ()) -> ResourceT' r t pm m ()
-withRes_ (Res x) f = f x
-
--- | Lift an operation from the underlying monad wrapped in a 'Res'.
-liftRes :: Monad m => Res r (m a) -> ResourceT' r t pm m (Res r a)
-liftRes (Res x) = Res <$> lift x
-
--- | Lift an operation from the underlying monad wrapped in a 'Res'.
-liftRes_ :: Monad m => Res r (m ()) -> ResourceT' r t pm m ()
-liftRes_ (Res x) = lift x
+performEventRes :: PerformEvent t m => Res r (Event t (Performable m a)) -> ResourceT' r t pm m (Res r (Event t a))
+performEventRes (Res x) = Res <$> performEvent x
 
 -- | Allocate a new resource.
 allocate :: (ResourceContext rp r, MonadAllocate pm m, Monad m)
