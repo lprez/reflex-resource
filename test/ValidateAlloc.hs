@@ -13,6 +13,8 @@ import Reflex.PerformEvent.Class
 import System.Random
 
 import Reflex.Resource.Allocate
+import Reflex.Resource.Unsafe
+import Reflex.Resource
 
 type ValidateState = (S.IntSet, I.IntMap S.IntSet)
 
@@ -46,9 +48,13 @@ instance (MonadIO m, MonadIO pm) => MonadAllocate pm (ValidateAllocT m) where
                             \(resources, frames) -> ((S.difference resources (frames I.! rid), I.delete rid frames), ())
                       )
 
-newResource :: (MonadIO m, Applicative f) => m (Int, f S.IntSet)
+newResource :: MonadIO m => m (Int, S.IntSet)
 newResource = do rid <- liftIO randomIO
-                 return (rid, pure $ S.singleton rid)
+                 return (rid, S.singleton rid)
+
+checkResources :: (Reflex t, MonadSample t m, MonadIO m) => DynRes r t S.IntSet -> Res r (ValidateAllocT m Bool)
+checkResources set = pure $ do sampledSet <- sample (current $ unDynRes set)
+                               and <$> mapM checkResource (S.toAscList sampledSet)
 
 checkResource :: MonadIO m => Int -> ValidateAllocT m Bool
 checkResource resid = validateAllocT $ \stateRef -> liftIO (readIORef stateRef) >>= \(resources, _) -> return $ S.member resid resources

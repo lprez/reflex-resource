@@ -37,8 +37,6 @@ module Reflex.Resource (
     -- ** Temporary context
     TmpResourceContext,
     withTmpContext,
-    allocateTmp,
-
     -- * Res monad
     Res,
     castRes,
@@ -55,9 +53,9 @@ module Reflex.Resource (
     -- *** Either resources
     withEitherRes,
     withEitherRes',
-    -- ** PerformEvent
-    performEventRes_,
-    performEventRes,
+    -- -- ** PerformEvent
+    -- performEventRes_,
+    -- performEventRes,
     -- * DynRes monad
     DynRes,
     dynRes,

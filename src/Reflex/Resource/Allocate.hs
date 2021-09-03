@@ -57,14 +57,14 @@ instance (Monad m, Monad pm) => MonadAllocate pm (AllocateT m) where
 -- | Creates a new resource. The actual allocation can either happen during the execution
 -- of the action in the first argument, or during the initialization. The deallocation
 -- must happen during the finalization.
-newResource :: (Monad m, Functor f)
+newResource :: Monad m
             => m a
             -- ^ The action that returns the value that will be wrapped in the @Res@
             -- (e.g. a handle).
-            -> (a -> f (pm (), pm ()))
+            -> (a -> (pm (), pm ()))
             -- ^ The initialization and finalization actions for the resource.
-            -> AllocateT m (a, f (AllocationM pm))
-newResource m f = AllocateT $ fmap (\x -> (x, fmap AllocationM $ f x)) m
+            -> AllocateT m (a, AllocationM pm)
+newResource m f = AllocateT $ fmap (\x -> (x, AllocationM (f x))) m
 
 instance Adjustable t m => Adjustable t (AllocateT m) where
     runWithReplace (AllocateT r0) r' =

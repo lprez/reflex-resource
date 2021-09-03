@@ -267,27 +267,23 @@ resourceContextDynRes' r = ResourceT (unResourceT (fmap (\(x, s) -> (x, DynRes $
 fmapResourceContextDynRes' :: (Functor f, Monad m) => (forall r'. ResourceContext r r' => f (ResourceT' r' t pm m (a, DynRes r' t b))) -> f (ResourceT' r t pm m (a, DynRes r t b))
 fmapResourceContextDynRes' r = fmap (\r' -> ResourceT (unResourceT (fmap (\(x, s) -> (x, DynRes $ unDynRes s)) r'))) (r @(InternalResourceContext _))
 
+{-
 performEventRes_ :: PerformEvent t m => Res r (Event t (Performable m ())) -> ResourceT' r t pm m ()
 performEventRes_ (Res x) = performEvent_ x
 
 performEventRes :: PerformEvent t m => Res r (Event t (Performable m a)) -> ResourceT' r t pm m (Res r (Event t a))
 performEventRes (Res x) = Res <$> performEvent x
+-}
 
 -- | Allocate a new resource.
 allocate :: (ResourceContext rp r, MonadAllocate pm m, Monad m)
-         => m (a, Res r (Allocation pm m))
+         => m (a, Allocation pm m)
          -> ResourceT' r t pm m (Res r a)
-allocate mkAllocation = do (x, Res newAllocations) <- lift mkAllocation
+allocate mkAllocation = do (x, newAllocations) <- lift mkAllocation
                            ResourceT . modify $ \rframe ->
                                 let allocations' = allocations rframe <> newAllocations
                                 in rframe { allocations = allocations' }
                            return (Res x)
-
--- | Allocate a new resource using some temporary resources.
-allocateTmp :: (ResourceContext rp r, MonadAllocate pm m, Monad m)
-            => m (a, Res (TmpResourceContext r) (Allocation pm m))
-            -> ResourceT' r t pm m (Res r a)
-allocateTmp = allocate . fmap (\(x, Res y) -> (x, Res y))
 
 -- | Use a temporary context to allocate some resources. The resources of the first context are deallocated after
 -- the initialization of the second context.

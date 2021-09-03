@@ -134,7 +134,9 @@ main = mainWidget $
                                 <*> buttonBarGui anySelected
 
                  return $ pure shutdownEv
-       -- Initialization (not really necessary here, since openFile doesn't use it).
+       -- Initialization (note that, even though openFile doesn't use it,
+       -- the library might require it for other purposes, like deallocating
+       -- resources from withTmpContext).
        performEvent_ $ fmapCheap (const $ liftIO initialization) initEv
        -- Finalization (closes any file that was left open).
        performEvent_ $ pushAlwaysCheap (const $ liftIO <$> finalization) shutdownEv

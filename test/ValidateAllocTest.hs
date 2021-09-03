@@ -53,8 +53,7 @@ test :: (ReplaceableResourceContext rp r t (Performable m) (ValidateAllocT m), M
      -> Event t Int
      -> ValidateT r t m (Res r (ValidateAllocT (Performable m) Bool))
 test e0 e1 e2 = do resourcesToCheck <- testIntMap (testIntMap (testIntMap testResource e2) e1) e0
-                   sampler <- dynResSampler resourcesToCheck
-                   return $ fmap (\s -> s >>= \rids -> mapM checkResource (S.toAscList rids) >>= return . and) sampler
+                   return $ checkResources resourcesToCheck
 
 run :: (Adjustable t m, MonadHold t m, MonadFix m, PerformEvent t m, MonadSample t (Performable m), MonadIO (Performable m), MonadIO m)
     => Event t Bool
