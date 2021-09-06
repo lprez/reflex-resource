@@ -26,5 +26,5 @@ openFile path mode = allocate $ newResource (liftIO $ catchIOError (Just <$> IO.
                                                                Nothing -> return ()
                                                         ))
 
-hGetLine :: MonadIO m => Res r IO.Handle -> m T.Text
+hGetLine :: (MonadIO m, MonadUseResource r r' m) => Res r IO.Handle -> m T.Text
 hGetLine h = liftIO $ catchIOError (IOT.hGetLine (unRes h)) (const $ return T.empty)

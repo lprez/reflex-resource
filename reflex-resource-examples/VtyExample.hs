@@ -67,8 +67,8 @@ fileTab selectedIndex idx path readMoreEv =
        withMaybeRes mHandle
                     (\handle ->
                        do -- Read some lines when readMoreEv fires.
-                          textUpdateEv <- performEvent $ fforCheap readMoreEv $
-                                   \i -> liftIO . fmap T.unlines $ mapM (\_ -> hGetLine handle) [1 .. i]
+                          textUpdateEv <- performEventRes $ fforCheap readMoreEv $
+                                   \i -> fmap T.unlines $ mapM (\_ -> hGetLine handle) [1 .. i]
                           -- Change the tab title when the tab is selected.
                           let tabTitle = fmap (\selected -> if idx == selected
                                                             then T.pack ('*' : path)

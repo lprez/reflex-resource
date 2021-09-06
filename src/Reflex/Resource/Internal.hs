@@ -9,6 +9,7 @@ import Control.Monad.Trans
 import Control.Monad.State.Lazy
 import Data.Maybe
 import Data.Functor.Compose
+import Data.Functor.Identity
 import Data.Functor.Misc (weakenDMapWith, ComposeMaybe(..))
 import qualified Data.Map as M
 import qualified Data.Patch.MapWithMove as M
@@ -156,6 +157,45 @@ class ResourceContext parent r | r -> parent
 instance {-# OVERLAPPABLE #-} (ResourceContext r1 r2, ResourceContext r2 r3) => ResourceContext r1 r3
 instance ResourceContext r (InternalResourceContext r)
 
+class InitialContext parent r | r -> parent
+instance {-# OVERLAPPABLE #-} (InitialContext r1 r2, InitialContext r2 r3) => InitialContext r1 r3
+instance InitialContext r (InternalResourceContext r)
+
+{-
+instance {-# OVERLAPPABLE #-} ResourceContext0 r1 r2 => TransientResource (TmpResourceContext r1) (InternalResourceContext r2)
+instance ResourceContext parent r => TransientResource r r
+instance ResourceContext parent r => TransientResource (TmpResourceContext r) r
+-}
+
+class Monad m => MonadUseResource res ctx (m :: * -> *) | m -> ctx where
+instance {-# OVERLAPPABLE #-} (Monad m, ResourceContext0 r1 r2) =>
+    MonadUseResource (TmpResourceContext r1) (InternalResourceContext r2) (ResourceT' (InternalResourceContext r2) t pm m)
+instance (Monad m, ResourceContext parent r) => MonadUseResource r r (ResourceT' r t pm m)
+instance (Monad m, ResourceContext parent r) => MonadUseResource (TmpResourceContext r) r (ResourceT' r t pm m)
+instance Monad m => MonadUseResource r (DummyContext r) (PerformableResT r m)
+
+data DummyContext r
+
+newtype PerformableResT r m a = PerformableResT { runDummyT :: m a }
+    deriving (Functor, Applicative, Monad, MonadIO, MonadFix, MonadSample t, MonadHold t)
+
+instance MonadTrans (PerformableResT r) where
+    lift = PerformableResT
+
+-- | 'performEvent' using resources from the current context.
+performEventRes :: (ResourceContext rp r, PerformEvent t m)
+                => (forall r'. (MonadUseResource r r' (PerformableResT r (Performable m))) => Event t (PerformableResT r (Performable m) a))
+                -> ResourceT' r t pm m (Event t a)
+performEventRes ev = performEvent (fmapCheap runDummyT (ev @(DummyContext _)))
+
+-- | 'performEvent_' using resources from the current context.
+performEventRes_ :: (ResourceContext rp r, PerformEvent t m)
+                 => (forall r'. (MonadUseResource r r' (PerformableResT r (Performable m))) => Event t (PerformableResT r (Performable m) ()))
+                 -> ResourceT' r t pm m ()
+performEventRes_ ev = performEvent_ (fmapCheap runDummyT (ev @(DummyContext _)))
+
+type ResourceContext0 parent r = (ResourceContext parent r, InitialContext parent r)
+
 instance MonadTrans (ResourceT' r t pm) where
     lift = ResourceT . lift
 
@@ -188,10 +228,16 @@ runRFrame :: (Monad m, Reflex t, Monad pm, MonadAllocate pm m)
           => (forall x. pm x -> Performable m x)
           -> ResourceT' r t pm m a
           -> m (a, (pm (), Behavior t (pm ())))
-runRFrame liftp r = do (x, rframe) <- runStateT (unResourceT $ r <* newRFrame)
-                                                emptyRFrame
-                       return (x, (initialization rframe, finalization rframe))
-    where emptyRFrame = RFrame mempty (return ()) (constant (return ())) liftp
+runRFrame liftp r = run liftp mempty $ r <* newRFrame
+
+run :: (Monad m, Monad pm, Reflex t)
+    => (forall x. pm x -> Performable m x)
+    -> Allocation pm m
+    -> ResourceT' r t pm m a
+    -> m (a, (pm (), Behavior t (pm ())))
+run liftp as r = do (x, rframe) <- runStateT (unResourceT r) emptyRFrame
+                    return (x, (initialization rframe, finalization rframe))
+    where emptyRFrame = RFrame as (return ()) (constant (return ())) liftp
 
 -- | Allocate the current frame and start a new one.
 newRFrame :: (Reflex t, Monad m, MonadAllocate pm m, Monad pm)
@@ -233,47 +279,39 @@ runResourceTContext' liftp f = runResourceT' liftp (unRes <$> f @(InternalResour
 
 
 -- | Run a 'ResourceT' computation in a context in which resources can be allocated.
-resourceContext :: (forall r'. ResourceContext r r' => ResourceT' r' t pm m a) -> ResourceT' r t pm m a
+resourceContext :: (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m a) -> ResourceT' r t pm m a
 resourceContext r = ResourceT (unResourceT (r @(InternalResourceContext _)))
 
-fmapResourceContext :: Functor f => (forall r'. ResourceContext r r' => f (ResourceT' r' t pm m a)) -> f (ResourceT' r t pm m a)
+fmapResourceContext :: Functor f => (forall r'. ResourceContext0 r r' => f (ResourceT' r' t pm m a)) -> f (ResourceT' r t pm m a)
 fmapResourceContext r = fmap (\r' -> ResourceT (unResourceT r')) (r @(InternalResourceContext _))
 
 -- | Same as 'resourceContext', but allows you to return resources wrapped in the 'Res' monad.
-resourceContextRes :: Monad m => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (Res r' a)) -> ResourceT' r t pm m (Res r a)
+resourceContextRes :: Monad m => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (Res r' a)) -> ResourceT' r t pm m (Res r a)
 resourceContextRes r = ResourceT (unResourceT (Res . unRes <$> (r @(InternalResourceContext _))))
 
-fmapResourceContextRes :: (Functor f, Monad m) => (forall r'. ResourceContext r r' => f (ResourceT' r' t pm m (Res r' a))) -> f (ResourceT' r t pm m (Res r a))
+fmapResourceContextRes :: (Functor f, Monad m) => (forall r'. ResourceContext0 r r' => f (ResourceT' r' t pm m (Res r' a))) -> f (ResourceT' r t pm m (Res r a))
 fmapResourceContextRes r = fmap (\r' -> ResourceT (unResourceT (Res . unRes <$> r'))) (r @(InternalResourceContext _))
 
 -- | Combination of 'resourceContext' and 'resourceContextRes'.
-resourceContextRes' :: Monad m => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (a, Res r' b)) -> ResourceT' r t pm m (a, Res r b)
+resourceContextRes' :: Monad m => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (a, Res r' b)) -> ResourceT' r t pm m (a, Res r b)
 resourceContextRes' r = ResourceT (unResourceT (fmap (\(x, s) -> (x, Res $ unRes s))  (r @(InternalResourceContext _))))
 
-fmapResourceContextRes' :: (Functor f, Monad m) => (forall r'. ResourceContext r r' => f (ResourceT' r' t pm m (a, Res r' b))) -> f (ResourceT' r t pm m (a, Res r b))
+fmapResourceContextRes' :: (Functor f, Monad m) => (forall r'. ResourceContext0 r r' => f (ResourceT' r' t pm m (a, Res r' b))) -> f (ResourceT' r t pm m (a, Res r b))
 fmapResourceContextRes' r = fmap (\r' -> ResourceT (unResourceT (fmap (\(x, s) -> (x, Res $ unRes s)) r'))) (r @(InternalResourceContext _))
 
 -- | Same as 'resourceContext', but allows you to return resources wrapped in the 'DynRes' monad.
-resourceContextDynRes :: Monad m => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (DynRes r' t a)) -> ResourceT' r t pm m (DynRes r t a)
+resourceContextDynRes :: Monad m => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (DynRes r' t a)) -> ResourceT' r t pm m (DynRes r t a)
 resourceContextDynRes r = ResourceT (unResourceT (DynRes . unDynRes <$> (r @(InternalResourceContext _))))
 
-fmapResourceContextDynRes :: (Functor f, Monad m) => (forall r'. ResourceContext r r' => f (ResourceT' r' t pm m (DynRes r' t a))) -> f (ResourceT' r t pm m (DynRes r t a))
+fmapResourceContextDynRes :: (Functor f, Monad m) => (forall r'. ResourceContext0 r r' => f (ResourceT' r' t pm m (DynRes r' t a))) -> f (ResourceT' r t pm m (DynRes r t a))
 fmapResourceContextDynRes r = fmap (\r' -> ResourceT (unResourceT (DynRes . unDynRes <$> r'))) (r @(InternalResourceContext _))
 
 -- | Combination of 'resourceContext' and 'resourceContextDynRes'.
-resourceContextDynRes' :: Monad m => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (a, DynRes r' t b)) -> ResourceT' r t pm m (a, DynRes r t b)
+resourceContextDynRes' :: Monad m => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (a, DynRes r' t b)) -> ResourceT' r t pm m (a, DynRes r t b)
 resourceContextDynRes' r = ResourceT (unResourceT (fmap (\(x, s) -> (x, DynRes $ unDynRes s))  (r @(InternalResourceContext _))))
 
-fmapResourceContextDynRes' :: (Functor f, Monad m) => (forall r'. ResourceContext r r' => f (ResourceT' r' t pm m (a, DynRes r' t b))) -> f (ResourceT' r t pm m (a, DynRes r t b))
+fmapResourceContextDynRes' :: (Functor f, Monad m) => (forall r'. ResourceContext0 r r' => f (ResourceT' r' t pm m (a, DynRes r' t b))) -> f (ResourceT' r t pm m (a, DynRes r t b))
 fmapResourceContextDynRes' r = fmap (\r' -> ResourceT (unResourceT (fmap (\(x, s) -> (x, DynRes $ unDynRes s)) r'))) (r @(InternalResourceContext _))
-
-{-
-performEventRes_ :: PerformEvent t m => Res r (Event t (Performable m ())) -> ResourceT' r t pm m ()
-performEventRes_ (Res x) = performEvent_ x
-
-performEventRes :: PerformEvent t m => Res r (Event t (Performable m a)) -> ResourceT' r t pm m (Res r (Event t a))
-performEventRes (Res x) = Res <$> performEvent x
--}
 
 -- | Allocate a new resource.
 allocate :: (ResourceContext rp r, MonadAllocate pm m, Monad m)
@@ -290,7 +328,7 @@ allocate mkAllocation = do (x, newAllocations) <- lift mkAllocation
 withTmpContext :: (Reflex t, MonadSample t m, Monad pm, MonadAllocate pm m, ResourceContext rp r, PerformEvent t m)
                => (forall r' t'. ResourceContext r r' => ResourceT' r' t' pm m (Res r' x))
                   -- ^ Context in which the temporary resources are created.
-               -> (forall r'. ResourceContext r r' => Res (TmpResourceContext r') x -> ResourceT' r' t pm m (Res r' b))
+               -> (forall r'. ResourceContext0 r r' => Res (TmpResourceContext r') x -> ResourceT' r' t pm m (Res r' b))
                   -- ^ Context in which the temporary resources are used.
                -> ResourceT' r t pm m (Res r b)
 withTmpContext t f = do rf <- ResourceT get
@@ -474,21 +512,21 @@ withDynResReplace' (DynRes dyn) f = sample (current dyn) >>= \dyn0 -> runWithRep
 -- | This is a version of 'runWithReplace' that can be used inside of a resource context and can allocate internal
 -- resources.
 runWithReplaceContext :: ReplaceableResourceContext rp r t pm m
-                      => (forall r'. ResourceContext r r' => ResourceT' r' t pm m a)
+                      => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m a)
                       -> (forall r'. ResourceContext r r' => Event t (ResourceT' r' t pm m b))
                       -> ResourceT' r t pm m (a, Event t b)
 runWithReplaceContext r0 ev = unsafeRunWithReplace (resourceContext r0) (fmapResourceContext ev)
 
 -- | Same as 'runWithReplaceContext', but in this case you can return the internal resources in the form of a 'DynRes'.
 runWithReplaceRes :: ReplaceableResourceContext rp r t pm m
-                  => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (Res r' a))
+                  => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (Res r' a))
                   -> (forall r'. ResourceContext r r' => Event t (ResourceT' r' t pm m (Res r' a)))
                   -> ResourceT' r t pm m (DynRes r t a)
 runWithReplaceRes r0 ev = unsafeRunWithReplace (resourceContextRes r0) (fmapResourceContextRes ev) >>= \(res0, res') -> (holdDynRes res0 res')
 
 -- | Combination of 'runWithReplaceContext' and 'runWithReplaceRes'.
 runWithReplaceRes' :: ReplaceableResourceContext rp r t pm m
-                   => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (a, Res r' c))
+                   => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (a, Res r' c))
                    -> (forall r'. ResourceContext r r' => Event t (ResourceT' r' t pm m (b, Res r' c)))
                    -> ResourceT' r t pm m (a, Event t b, DynRes r t c)
 runWithReplaceRes' r0 ev = do ((x0, s0), res') <- unsafeRunWithReplace (resourceContextRes' r0) (fmapResourceContextRes' ev)
@@ -497,21 +535,21 @@ runWithReplaceRes' r0 ev = do ((x0, s0), res') <- unsafeRunWithReplace (resource
 
 -- | Same as 'runWithReplaceRes', but in this case the resources to be returned are already 'DynRes'.
 runWithReplaceDynRes :: ReplaceableResourceContext rp r t pm m
-                     => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (DynRes r' t a))
+                     => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (DynRes r' t a))
                      -> (forall r'. ResourceContext r r' => Event t (ResourceT' r' t pm m (DynRes r' t a)))
                      -> ResourceT' r t pm m (DynRes r t a)
 runWithReplaceDynRes r0 ev = unsafeRunWithReplace (resourceContextDynRes r0) (fmapResourceContextDynRes ev) >>= \(res0, res') -> join <$> holdDynRes (pure res0) (fmapCheap pure res')
 
 -- | 'runWithReplaceDynRes'
 dynResReplace :: ReplaceableResourceContext rp r t pm m
-              => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (DynRes r' t a))
+              => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (DynRes r' t a))
               -> (forall r'. ResourceContext r r' => Event t (ResourceT' r' t pm m (DynRes r' t a)))
               -> ResourceT' r t pm m (DynRes r t a)
 dynResReplace = runWithReplaceDynRes
 
 -- | Combination of 'runWithReplaceContext' and 'runWithReplaceDynRes'.
 runWithReplaceDynRes' :: ReplaceableResourceContext rp r t pm m
-                      => (forall r'. ResourceContext r r' => ResourceT' r' t pm m (a, DynRes r' t c))
+                      => (forall r'. ResourceContext0 r r' => ResourceT' r' t pm m (a, DynRes r' t c))
                       -> (forall r'. ResourceContext r r' => Event t (ResourceT' r' t pm m (b, DynRes r' t c)))
                       -> ResourceT' r t pm m (a, Event t b, DynRes r t c)
 runWithReplaceDynRes' r0 ev = do ((x0, s0), res') <- unsafeRunWithReplace (resourceContextDynRes' r0) (fmapResourceContextDynRes' ev)

@@ -1,5 +1,10 @@
+{-# LANGUAGE RankNTypes, TypeApplications, FlexibleContexts #-}
+
 module Reflex.Resource (
+    MonadUseResource,
     ResourceContext,
+    InitialContext,
+    ResourceContext0,
     -- * ResourceT monad
     ResourceT',
     ResourceT,
@@ -14,6 +19,10 @@ module Reflex.Resource (
     -- resourceContextDynRes,
     -- resourceContextDynRes',
     hoistResourceT,
+    -- ** PerformEvent
+    PerformableResT,
+    performEventRes_,
+    performEventRes,
     -- ** Adjustable-like operations
     ReplaceableResourceContext,
     runWithReplaceContext,
@@ -53,9 +62,6 @@ module Reflex.Resource (
     -- *** Either resources
     withEitherRes,
     withEitherRes',
-    -- -- ** PerformEvent
-    -- performEventRes_,
-    -- performEventRes,
     -- * DynRes monad
     DynRes,
     dynRes,
@@ -82,4 +88,10 @@ module Reflex.Resource (
 ) where
 
 import Reflex.Resource.DynRes
-import Reflex.Resource.Internal
+import Reflex.Resource.Internal hiding (resourceContext)
+import qualified Reflex.Resource.Internal as Internal
+
+
+-- | Run a 'ResourceT' computation in a context in which resources can be allocated.
+resourceContext :: (forall r'. ResourceContext () r' => ResourceT' r' t pm m a) -> ResourceT' () t pm m a
+resourceContext r = ResourceT (unResourceT (r @(InternalResourceContext _)))
